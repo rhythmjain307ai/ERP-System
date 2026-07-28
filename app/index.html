@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ForgeMatrix ERP Mobile</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main class="app-shell" id="erpApp">
+  <section class="phone-frame">
+    <div class="status-bar">
+      <span>9:41</span>
+      <div class="status-icons" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
+
+    <section class="screen auth-screen is-active" data-screen="login">
+      <div class="auth-brand">
+        <div class="brand-mark">FM</div>
+        <div>
+          <p class="eyebrow">ForgeMatrix ERP</p>
+          <h1>Manufacturing operations, unified.</h1>
+        </div>
+      </div>
+      <form class="auth-card">
+        <label>Email</label>
+        <input value="manager@forgeworks.com" type="email" aria-label="Email">
+        <label>Password</label>
+        <input value="production" type="password" aria-label="Password">
+        <button class="primary-btn" type="button" data-action="enter-app">Sign in</button>
+        <button class="link-btn" type="button" data-auth="forgot">Forgot password?</button>
+      </form>
+      <div class="auth-meta">
+        <span>Role based access</span>
+        <span>ISO ready workflows</span>
+      </div>
+    </section>
+
+    <section class="screen auth-screen" data-screen="forgot">
+      <button class="icon-btn back-auth" type="button" data-auth="login" aria-label="Back">
+        <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <div class="auth-brand compact">
+        <div class="brand-mark">FM</div>
+        <div>
+          <p class="eyebrow">Password recovery</p>
+          <h1>Verify your account</h1>
+        </div>
+      </div>
+      <form class="auth-card">
+        <label>Registered email</label>
+        <input value="accounts@forgeworks.com" type="email" aria-label="Registered email">
+        <button class="primary-btn" type="button" data-auth="otp">Send OTP</button>
+      </form>
+    </section>
+
+    <section class="screen auth-screen" data-screen="otp">
+      <button class="icon-btn back-auth" type="button" data-auth="forgot" aria-label="Back">
+        <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <div class="auth-brand compact">
+        <div class="brand-mark">FM</div>
+        <div>
+          <p class="eyebrow">OTP verification</p>
+          <h1>Enter secure code</h1>
+        </div>
+      </div>
+      <form class="auth-card">
+        <div class="otp-row" aria-label="One time password">
+          <input value="4" maxlength="1">
+          <input value="8" maxlength="1">
+          <input value="2" maxlength="1">
+          <input value="9" maxlength="1">
+        </div>
+        <button class="primary-btn" type="button" data-auth="reset">Verify code</button>
+        <button class="link-btn" type="button">Resend in 24s</button>
+      </form>
+    </section>
+
+    <section class="screen auth-screen" data-screen="reset">
+      <button class="icon-btn back-auth" type="button" data-auth="otp" aria-label="Back">
+        <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <div class="auth-brand compact">
+        <div class="brand-mark">FM</div>
+        <div>
+          <p class="eyebrow">Reset password</p>
+          <h1>Create new credentials</h1>
+        </div>
+      </div>
+      <form class="auth-card">
+        <label>New password</label>
+        <input value="forge-secure" type="password" aria-label="New password">
+        <label>Confirm password</label>
+        <input value="forge-secure" type="password" aria-label="Confirm password">
+        <button class="primary-btn" type="button" data-action="enter-app">Update password</button>
+      </form>
+    </section>
+
+    <section class="screen main-screen" data-screen="app">
+      <header class="top-app-bar">
+        <div>
+          <p class="eyebrow">Good morning, Rhythm</p>
+          <h2 id="screenTitle">Dashboard</h2>
+        </div>
+        <button class="avatar-btn" type="button" data-route="profile" aria-label="Open profile">RJ</button>
+      </header>
+
+      <section class="content-view is-active" data-view="dashboard">
+        <div class="company-card">
+          <div>
+            <p class="eyebrow">ForgeWorks Industries</p>
+            <h3>Metal forging and machining unit</h3>
+            <span class="status-pill good">All plants operational</span>
+          </div>
+          <div class="mini-gauge">
+            <span>87%</span>
+            <small>capacity</small>
+          </div>
+        </div>
+
+        <div class="kpi-grid">
+          <article class="kpi-card">
+            <span class="card-icon sales"></span>
+            <p>Today's Sales</p>
+            <strong>₹18.7L</strong>
+            <small>+12.4% vs yesterday</small>
+          </article>
+          <article class="kpi-card">
+            <span class="card-icon orders"></span>
+            <p>Pending Orders</p>
+            <strong>42</strong>
+            <small>8 high priority</small>
+          </article>
+          <article class="kpi-card">
+            <span class="card-icon inventory"></span>
+            <p>Inventory Value</p>
+            <strong>₹3.42Cr</strong>
+            <small>11 low-stock SKUs</small>
+          </article>
+          <article class="kpi-card">
+            <span class="card-icon production"></span>
+            <p>Production Status</p>
+            <strong>87%</strong>
+            <small>Line B delayed</small>
+          </article>
+          <article class="kpi-card">
+            <span class="card-icon payments"></span>
+            <p>Pending Payments</p>
+            <strong>₹46.2L</strong>
+            <small>16 invoices due</small>
+          </article>
+          <article class="kpi-card">
+            <span class="card-icon revenue"></span>
+            <p>Monthly Revenue</p>
+            <strong>₹4.8Cr</strong>
+            <small>Target 72% reached</small>
+          </article>
+        </div>
+
+        <section class="panel">
+          <div class="section-head">
+            <h3>Quick Actions</h3>
+          </div>
+          <div class="quick-grid">
+            <button type="button" data-toast="Invoice draft created"><span class="icon invoice"></span>Create Invoice</button>
+            <button type="button" data-toast="Document scanner ready"><span class="icon upload"></span>Upload Document</button>
+            <button type="button" data-toast="Customer form opened"><span class="icon customer"></span>Add Customer</button>
+            <button type="button" data-toast="Vendor form opened"><span class="icon vendor"></span>Add Vendor</button>
+            <button type="button" data-toast="Purchase order draft created"><span class="icon po"></span>Create PO</button>
+            <button type="button" data-toast="Production job scheduled"><span class="icon job"></span>Production Job</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <h3>Revenue</h3>
+            <button class="chip-btn active" type="button">Monthly</button>
+          </div>
+          <div class="bar-chart" aria-label="Monthly revenue chart">
+            <span style="--h:46%"></span>
+            <span style="--h:64%"></span>
+            <span style="--h:52%"></span>
+            <span style="--h:78%"></span>
+            <span style="--h:70%"></span>
+            <span style="--h:88%"></span>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="section-head">
+            <h3>Recent Activities</h3>
+            <button class="text-btn" type="button">View all</button>
+          </div>
+          <div class="activity-list">
+            <article><span class="dot blue"></span><div><strong>Invoice INV-2048 approved</strong><small>Acme Auto Parts · 8 min ago</small></div></article>
+            <article><span class="dot amber"></span><div><strong>EN-8 steel below reorder level</strong><small>Warehouse 2 · 21 min ago</small></div></article>
+            <article><span class="dot green"></span><div><strong>Heat treatment batch completed</strong><small>Production Line A · 36 min ago</small></div></article>
+          </div>
+        </section>
+      </section>
+
+      <section class="content-view" data-view="operations">
+        <div class="search-row">
+          <label class="search-box">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+            <input placeholder="Search operations, jobs, inventory" aria-label="Search operations">
+          </label>
+          <button class="filter-btn" type="button" data-filter aria-label="Filters">
+            <svg viewBox="0 0 24 24"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
+          </button>
+        </div>
+        <div class="filter-strip">
+          <button class="chip-btn active" type="button" data-module="customers">Customers</button>
+          <button class="chip-btn" type="button" data-module="vendors">Vendors</button>
+          <button class="chip-btn" type="button" data-module="invoices">Invoices</button>
+          <button class="chip-btn" type="button" data-module="purchase">Purchase</button>
+          <button class="chip-btn" type="button" data-module="inventory">Inventory</button>
+          <button class="chip-btn" type="button" data-module="production">Production</button>
+          <button class="chip-btn" type="button" data-module="payments">Payments</button>
+          <button class="chip-btn" type="button" data-module="expenses">Expenses</button>
+        </div>
+        <div class="module-stack" id="moduleStack"></div>
+      </section>
+
+      <section class="content-view" data-view="documents">
+        <div class="search-row">
+          <label class="search-box">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+            <input placeholder="Search PDFs, approvals, OCR text" aria-label="Search documents">
+          </label>
+          <button class="filter-btn" type="button" data-filter aria-label="Document filters">
+            <svg viewBox="0 0 24 24"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
+          </button>
+        </div>
+        <div class="scanner-card">
+          <div class="scan-frame">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <div>
+            <p class="eyebrow">Camera Scanner</p>
+            <h3>Upload PDF or scan purchase bills</h3>
+            <small>OCR extracts GST, vendor, line items, and totals for review.</small>
+          </div>
+          <button class="primary-btn small" type="button" data-toast="OCR processing started">Scan</button>
+        </div>
+        <section class="panel">
+          <div class="section-head">
+            <h3>Approval Workflow</h3>
+            <span class="status-pill warn">5 waiting</span>
+          </div>
+          <div class="activity-list">
+            <article><span class="doc-badge">PDF</span><div><strong>Vendor Bill VB-8821</strong><small>OCR 96% · Needs account code</small></div><button class="mini-btn" data-toast="Document approved">Approve</button></article>
+            <article><span class="doc-badge">PO</span><div><strong>Purchase Order PO-4109</strong><small>Manager review · ₹8.4L</small></div><button class="mini-btn" data-toast="Sent for approval">Route</button></article>
+            <article><span class="doc-badge">INV</span><div><strong>Invoice INV-2051</strong><small>PDF preview generated</small></div><button class="mini-btn" data-toast="PDF preview opened">Preview</button></article>
+          </div>
+        </section>
+        <div class="state-row">
+          <article class="state-card skeleton"><span></span><b></b><small></small></article>
+          <article class="state-card empty"><strong>No rejected files</strong><small>Rejected documents will appear here.</small></article>
+        </div>
+      </section>
+
+      <section class="content-view" data-view="analytics">
+        <div class="search-row">
+          <label class="search-box">
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+            <input placeholder="Search KPIs and reports" aria-label="Search analytics">
+          </label>
+          <button class="filter-btn" type="button" data-filter aria-label="Analytics filters">
+            <svg viewBox="0 0 24 24"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
+          </button>
+        </div>
+        <div class="profit-card">
+          <p class="eyebrow">Profit / Loss Summary</p>
+          <strong>₹1.26Cr</strong>
+          <span>Gross margin 24.8% · EBITDA +6.1%</span>
+        </div>
+        <section class="panel">
+          <div class="section-head">
+            <h3>Performance Charts</h3>
+            <button class="chip-btn active" type="button">Q3</button>
+          </div>
+          <div class="line-chart">
+            <svg viewBox="0 0 320 150" role="img" aria-label="Revenue, expense, production, and inventory trends">
+              <path class="grid" d="M10 120H310M10 85H310M10 50H310"/>
+              <path class="line revenue-line" d="M10 112C55 90 76 105 116 76S188 38 222 54 272 88 310 30"/>
+              <path class="line expense-line" d="M10 126C56 115 80 118 120 96S178 88 220 92 268 72 310 80"/>
+              <path class="line prod-line" d="M10 96C45 74 75 78 116 62S184 70 220 44 270 50 310 42"/>
+            </svg>
+            <div class="legend-row">
+              <span><i class="blue"></i>Revenue</span>
+              <span><i class="red"></i>Expense</span>
+              <span><i class="green"></i>Production</span>
+            </div>
+          </div>
+        </section>
+        <div class="kpi-grid narrow">
+          <article class="kpi-card"><p>Inventory Turnover</p><strong>4.8x</strong><small>Healthy</small></article>
+          <article class="kpi-card"><p>OEE</p><strong>82%</strong><small>+3.2%</small></article>
+          <article class="kpi-card"><p>Receivables</p><strong>31d</strong><small>DSO</small></article>
+          <article class="kpi-card"><p>Expense Ratio</p><strong>18%</strong><small>Within plan</small></article>
+        </div>
+      </section>
+
+      <section class="content-view" data-view="profile">
+        <section class="profile-card">
+          <div class="profile-avatar">RJ</div>
+          <h3>Rhythm Jain</h3>
+          <p>Operations Director</p>
+          <span class="status-pill good">Admin access</span>
+        </section>
+        <section class="panel">
+          <div class="settings-list">
+            <button type="button"><span>User Information</span><small>Phone, email, signature</small></button>
+            <button type="button"><span>Company Details</span><small>GST, plants, warehouses</small></button>
+            <button type="button"><span>Settings</span><small>Theme, notifications, security</small></button>
+            <button type="button"><span>Role & Permissions</span><small>Accounting, inventory, approvals</small></button>
+            <button class="danger" type="button" data-auth="login"><span>Logout</span><small>End secure session</small></button>
+          </div>
+        </section>
+      </section>
+
+      <button class="fab" id="fab" type="button" aria-label="Add record">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+
+      <nav class="bottom-nav" aria-label="Primary navigation">
+        <button class="is-active" type="button" data-route="dashboard">
+          <svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7v9H4z"/><path d="M9 20v-6h6v6"/></svg>
+          <span>Dashboard</span>
+        </button>
+        <button type="button" data-route="operations">
+          <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="8" cy="7" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+          <span>Operations</span>
+        </button>
+        <button type="button" data-route="documents">
+          <svg viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg>
+          <span>Documents</span>
+        </button>
+        <button type="button" data-route="analytics">
+          <svg viewBox="0 0 24 24"><path d="M5 19V5M5 19h15"/><path d="M9 16V9M14 16V6M19 16v-4"/></svg>
+          <span>Analytics</span>
+        </button>
+        <button type="button" data-route="profile">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 14.5-4 16 0"/></svg>
+          <span>Profile</span>
+        </button>
+      </nav>
+    </section>
+    <div class="toast" id="toast" role="status" aria-live="polite">Saved successfully</div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
