@@ -11,11 +11,9 @@
     "seed": "node prisma/seed.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
+    "@prisma/client": "^6.19.3",
     "dotenv": "^16.0.3",
-    "@prisma/client": "^5.10.1"
-  },
-  "devDependencies": {
-    "prisma": "^5.10.1"
+    "express": "^4.18.2",
+    "prisma": "^6.19.3"
   }
 }
