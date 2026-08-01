@@ -1,0 +1,21 @@
+{
+  "name": "erp-backend",
+  "version": "0.1.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node server.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev --name init",
+    "seed": "node prisma/seed.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "dotenv": "^16.0.3",
+    "@prisma/client": "^5.10.1"
+  },
+  "devDependencies": {
+    "prisma": "^5.10.1"
+  }
+}
