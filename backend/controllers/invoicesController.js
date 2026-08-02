@@ -30,15 +30,17 @@ exports.create = async (req, res, next) => {
     }
 
     const result = await prismaTx.$transaction(async (tx) => {
-      const customer = await tx.customer.findUnique({ where: { id: data.customerId } });
+      const customer = await tx.customer.findUnique({ where: { customerId: data.customerId } });
       if (!customer) throw new Error('Customer not found');
 
       // Validate and prepare items
       let total = 0;
+      const resolvedItems = [];
       for (const item of data.items) {
-        const sku = await tx.inventory.findUnique({ where: { id: item.skuId } });
+        const sku = await tx.inventory.findUnique({ where: { skuId: item.skuId } });
         if (!sku) throw new Error(`SKU ${item.skuId} not found`);
         if (sku.stock < item.quantity) throw new Error(`${sku.name} does not have enough stock`);
+        resolvedItems.push({ sku, item });
         total += Number(item.quantity) * Number(item.rate);
       }
 
@@ -52,17 +54,17 @@ exports.create = async (req, res, next) => {
         total: total
       }});
 
-      for (const item of data.items) {
+      for (const { sku, item } of resolvedItems) {
         await tx.invoiceItem.create({ data: {
           invoiceId: invoice.id,
-          skuId: item.skuId,
+          skuId: sku.id,
           description: item.description || null,
           quantity: item.quantity,
           rate: item.rate
         }});
 
         // decrement stock
-        await tx.inventory.update({ where: { id: item.skuId }, data: { stock: { decrement: item.quantity } } });
+        await tx.inventory.update({ where: { id: sku.id }, data: { stock: { decrement: item.quantity } } });
       }
 
       // update customer outstanding

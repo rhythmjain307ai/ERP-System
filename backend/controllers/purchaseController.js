@@ -16,7 +16,7 @@ exports.create = async (req, res, next) => {
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      const vendor = await tx.vendor.findUnique({ where: { id: data.vendorId } });
+      const vendor = await tx.vendor.findUnique({ where: { vendorId: data.vendorId } });
       if (!vendor) throw new Error('Vendor not found');
 
       const po = await tx.purchaseOrder.create({ data: {
@@ -28,9 +28,11 @@ exports.create = async (req, res, next) => {
       }});
 
       for (const item of data.items) {
+        const sku = await tx.inventory.findUnique({ where: { skuId: item.skuId } });
+        if (!sku) throw new Error(`SKU ${item.skuId} not found`);
         await tx.purchaseOrderItem.create({ data: {
           poId: po.id,
-          skuId: item.skuId,
+          skuId: sku.id,
           description: item.description || null,
           quantity: item.quantity,
           rate: item.rate

@@ -11,11 +11,15 @@ exports.listJobs = async (req, res, next) => {
 exports.createJob = async (req, res, next) => {
   const data = req.body;
   try {
-    if (!data.productId || !data.plannedQuantity) return res.status(400).json({ error: 'productId and plannedQuantity required' });
+    if (!data.productSkuId && !data.productId) return res.status(400).json({ error: 'productSkuId or productId and plannedQuantity required' });
+    if (!data.plannedQuantity) return res.status(400).json({ error: 'plannedQuantity required' });
+
+    const product = await prisma.inventory.findUnique({ where: { skuId: data.productSkuId || data.productId } });
+    if (!product) return res.status(404).json({ error: 'Product not found' });
 
     const job = await prisma.productionJob.create({ data: {
       jobId: data.jobId || `JOB-${Date.now()}`,
-      productId: data.productId,
+      productId: product.id,
       plannedQuantity: data.plannedQuantity,
       completedQuantity: 0,
       line: data.line || 'Line A',

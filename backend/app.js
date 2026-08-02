@@ -1,5 +1,4 @@
 const express = require('express');
-const bodyParser = require('express').json;
 const customersRouter = require('./routes/customers');
 const invoicesRouter = require('./routes/invoices');
 const purchaseRouter = require('./routes/purchaseOrders');
@@ -7,7 +6,7 @@ const productionRouter = require('./routes/production');
 const inventoryRouter = require('./routes/inventory');
 
 const app = express();
-app.use(bodyParser());
+app.use(express.json());
 
 app.use('/api/customers', customersRouter);
 app.use('/api/invoices', invoicesRouter);

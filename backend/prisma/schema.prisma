@@ -23,27 +23,32 @@ model Customer {
 }
 
 model Vendor {
-  id          String   @id @default(cuid())
-  vendorId    String   @unique
-  companyName String
-  category    String?
-  leadTimeDays Int?
-  outstanding Decimal @default(0)
-  status      String  @default("active")
-  createdAt   DateTime @default(now())
+  id            String           @id @default(cuid())
+  vendorId      String           @unique
+  companyName   String
+  category      String?
+  leadTimeDays  Int?
+  outstanding   Decimal          @default(0)
+  status        String           @default("active")
+  createdAt     DateTime         @default(now())
+  payments      Payment[]
+  purchaseOrders PurchaseOrder[]
 }
 
 model Inventory {
-  id           String   @id @default(cuid())
-  skuId        String   @unique
-  name         String
-  type         String
-  warehouse    String?
-  unit         String?
-  stock        Int      @default(0)
-  reorderLevel Int      @default(0)
-  averageCost  Decimal  @default(0)
-  createdAt    DateTime @default(now())
+  id                String               @id @default(cuid())
+  skuId             String               @unique
+  name              String
+  type              String
+  warehouse         String?
+  unit              String?
+  stock             Int                  @default(0)
+  reorderLevel      Int                  @default(0)
+  averageCost       Decimal              @default(0)
+  createdAt         DateTime             @default(now())
+  invoiceItems      InvoiceItem[]
+  purchaseOrderItems PurchaseOrderItem[]
+  productionJobs    ProductionJob[]
 }
 
 model Invoice {
@@ -62,14 +67,14 @@ model Invoice {
 }
 
 model InvoiceItem {
-  id        String  @id @default(cuid())
-  invoice   Invoice @relation(fields: [invoiceId], references: [id])
-  invoiceId String
-  sku       Inventory @relation(fields: [skuId], references: [id])
-  skuId     String
+  id          String    @id @default(cuid())
+  invoice     Invoice   @relation(fields: [invoiceId], references: [id])
+  invoiceId   String
+  sku         Inventory @relation(fields: [skuId], references: [id])
+  skuId       String
   description String?
-  quantity  Int
-  rate      Decimal
+  quantity    Int
+  rate        Decimal
 }
 
 model Payment {
@@ -99,27 +104,27 @@ model PurchaseOrder {
 }
 
 model PurchaseOrderItem {
-  id        String @id @default(cuid())
-  po        PurchaseOrder @relation(fields: [poId], references: [id])
-  poId      String
-  sku       Inventory @relation(fields: [skuId], references: [id])
-  skuId     String
+  id          String        @id @default(cuid())
+  po          PurchaseOrder @relation(fields: [poId], references: [id])
+  poId        String
+  sku         Inventory     @relation(fields: [skuId], references: [id])
+  skuId       String
   description String?
-  quantity  Int
-  rate      Decimal
+  quantity    Int
+  rate        Decimal
 }
 
 model ProductionJob {
-  id               String @id @default(cuid())
-  jobId            String @unique
-  product          Inventory @relation(fields: [productId], references: [id])
-  productId        String
-  plannedQuantity  Int
-  completedQuantity Int @default(0)
-  line             String
-  status           String
-  startDate        DateTime
-  createdAt        DateTime @default(now())
+  id                String    @id @default(cuid())
+  jobId             String    @unique
+  product           Inventory @relation(fields: [productId], references: [id])
+  productId         String
+  plannedQuantity   Int
+  completedQuantity Int       @default(0)
+  line              String
+  status            String
+  startDate         DateTime
+  createdAt         DateTime  @default(now())
 }
 
 model Expense {
