@@ -9,6 +9,7 @@ datasource db {
 
 model accounting_entry {
   accounting_entry_id BigInt          @id @default(autoincrement())
+  company_id          BigInt
   entry_date          DateTime        @default(dbgenerated("CURRENT_DATE")) @db.Date
   source_type         String?
   source_id           BigInt?
@@ -16,44 +17,50 @@ model accounting_entry {
   status              String          @default("POSTED")
   created_by          BigInt?
   created_at          DateTime        @default(now()) @db.Timestamptz(6)
+  company             company         @relation(fields: [company_id], references: [company_id], onDelete: Cascade, onUpdate: NoAction)
   users               users?          @relation(fields: [created_by], references: [user_id], onUpdate: NoAction, map: "fk_accounting_entry_user")
   journal_entry       journal_entry[]
+
+  @@index([company_id, entry_date], map: "idx_accounting_entry_company_date")
 }
 
 model accounts_payable {
-  accounts_payable_id BigInt          @id @default(autoincrement())
+  accounts_payable_id BigInt               @id @default(autoincrement())
   vendor_id           BigInt
-  vendor_invoice_id   BigInt?         @unique
+  vendor_invoice_id   BigInt?              @unique
   expense_id          BigInt?
-  due_date            DateTime?       @db.Date
-  invoice_amount      Decimal         @default(0) @db.Decimal(16, 2)
-  paid_amount         Decimal         @default(0) @db.Decimal(16, 2)
-  outstanding_amount  Decimal         @default(0) @db.Decimal(16, 2)
-  status              String          @default("OPEN")
-  expense             expense?        @relation(fields: [expense_id], references: [expense_id], onUpdate: NoAction)
-  vendor              vendor          @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_ap_vendor")
-  vendor_invoice      vendor_invoice? @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onUpdate: NoAction, map: "fk_ap_invoice")
+  due_date            DateTime?            @db.Date
+  invoice_amount      Decimal              @default(0) @db.Decimal(16, 2)
+  paid_amount         Decimal              @default(0) @db.Decimal(16, 2)
+  outstanding_amount  Decimal              @default(0) @db.Decimal(16, 2)
+  status              String               @default("OPEN")
+  expense             expense?             @relation(fields: [expense_id], references: [expense_id], onUpdate: NoAction)
+  vendor              vendor               @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_ap_vendor")
+  vendor_invoice      vendor_invoice?      @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onUpdate: NoAction, map: "fk_ap_invoice")
+  payment_allocation  payment_allocation[]
 
   @@index([vendor_id, status], map: "idx_payable_vendor_status")
 }
 
 model accounts_receivable {
-  accounts_receivable_id BigInt         @id @default(autoincrement())
+  accounts_receivable_id BigInt               @id @default(autoincrement())
   customer_id            BigInt
-  sales_invoice_id       BigInt?        @unique
-  due_date               DateTime?      @db.Date
-  invoice_amount         Decimal        @default(0) @db.Decimal(16, 2)
-  received_amount        Decimal        @default(0) @db.Decimal(16, 2)
-  outstanding_amount     Decimal        @default(0) @db.Decimal(16, 2)
-  status                 String         @default("OPEN")
-  customer               customer       @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction, map: "fk_ar_customer")
-  sales_invoice          sales_invoice? @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onUpdate: NoAction, map: "fk_ar_invoice")
+  sales_invoice_id       BigInt?              @unique
+  due_date               DateTime?            @db.Date
+  invoice_amount         Decimal              @default(0) @db.Decimal(16, 2)
+  received_amount        Decimal              @default(0) @db.Decimal(16, 2)
+  outstanding_amount     Decimal              @default(0) @db.Decimal(16, 2)
+  status                 String               @default("OPEN")
+  customer               customer             @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction, map: "fk_ar_customer")
+  sales_invoice          sales_invoice?       @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onUpdate: NoAction, map: "fk_ar_invoice")
+  payment_allocation     payment_allocation[]
 
   @@index([customer_id, status], map: "idx_receivable_customer_status")
 }
 
 model approval_action {
   approval_action_id   BigInt            @id @default(autoincrement())
+  approval_request_id  BigInt?
   approval_workflow_id BigInt
   approval_step_id     BigInt?
   transaction_type     String
@@ -63,8 +70,11 @@ model approval_action {
   action_at            DateTime          @default(now()) @db.Timestamptz(6)
   comments             String?
   users                users?            @relation(fields: [action_by], references: [user_id], onUpdate: NoAction)
+  approval_request     approval_request? @relation(fields: [approval_request_id], references: [approval_request_id], onDelete: Cascade, onUpdate: NoAction)
   approval_step        approval_step?    @relation(fields: [approval_step_id], references: [approval_step_id], onUpdate: NoAction, map: "fk_approval_action_step")
   approval_workflow    approval_workflow @relation(fields: [approval_workflow_id], references: [approval_workflow_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([transaction_type, transaction_id], map: "idx_approval_action_transaction")
 }
 
 model approval_step {
@@ -82,11 +92,12 @@ model approval_step {
 }
 
 model approval_workflow {
-  approval_workflow_id BigInt            @id @default(autoincrement())
-  workflow_name        String            @unique
+  approval_workflow_id BigInt             @id @default(autoincrement())
+  workflow_name        String             @unique
   transaction_type     String
-  is_active            Boolean           @default(true)
+  is_active            Boolean            @default(true)
   approval_action      approval_action[]
+  approval_request     approval_request[]
   approval_step        approval_step[]
 }
 
@@ -158,15 +169,16 @@ model bank_transaction {
 }
 
 model bill_of_material {
-  bom_id           BigInt         @id @default(autoincrement())
+  bom_id           BigInt             @id @default(autoincrement())
   finished_item_id BigInt
-  bom_code         String         @unique
-  version          String         @default("1")
-  is_active        Boolean        @default(true)
-  effective_from   DateTime?      @db.Date
-  effective_to     DateTime?      @db.Date
-  inventory_item   inventory_item @relation(fields: [finished_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  bom_code         String             @unique
+  version          String             @default("1")
+  is_active        Boolean            @default(true)
+  effective_from   DateTime?          @db.Date
+  effective_to     DateTime?          @db.Date
+  inventory_item   inventory_item     @relation(fields: [finished_item_id], references: [inventory_item_id], onUpdate: NoAction)
   bom_item         bom_item[]
+  production_order production_order[]
 
   @@unique([finished_item_id, version])
 }
@@ -186,40 +198,47 @@ model bom_item {
 
 model chart_of_account {
   account_id             BigInt             @id @default(autoincrement())
-  account_code           String             @unique
+  company_id             BigInt
+  account_code           String
   account_name           String
   account_type           String
   parent_account_id      BigInt?
   is_active              Boolean            @default(true)
+  company                company            @relation(fields: [company_id], references: [company_id], onDelete: Cascade, onUpdate: NoAction)
   chart_of_account       chart_of_account?  @relation("chart_of_accountTochart_of_account", fields: [parent_account_id], references: [account_id], onUpdate: NoAction, map: "fk_chart_account_parent")
   other_chart_of_account chart_of_account[] @relation("chart_of_accountTochart_of_account")
   journal_line           journal_line[]
+
+  @@unique([company_id, account_code])
+  @@index([company_id], map: "idx_chart_of_account_company")
 }
 
 model company {
-  company_id    BigInt         @id @default(autoincrement())
-  company_name  String
-  legal_name    String?
-  gstin         String?        @unique @db.VarChar(15)
-  pan           String?        @db.VarChar(10)
-  cin           String?        @db.VarChar(21)
-  email         String?
-  phone         String?
-  address_line1 String?
-  address_line2 String?
-  city          String?
-  state         String?
-  state_code    String?        @db.VarChar(5)
-  pincode       String?        @db.VarChar(10)
-  country       String         @default("India")
-  created_at    DateTime       @default(now()) @db.Timestamptz(6)
-  updated_at    DateTime       @default(now()) @db.Timestamptz(6)
-  bank_account  bank_account[]
-  customer      customer[]
-  department    department[]
-  employee      employee[]
-  factory       factory[]
-  vendor        vendor[]
+  company_id       BigInt             @id @default(autoincrement())
+  company_name     String
+  legal_name       String?
+  gstin            String?            @unique @db.VarChar(15)
+  pan              String?            @db.VarChar(10)
+  cin              String?            @db.VarChar(21)
+  email            String?
+  phone            String?
+  address_line1    String?
+  address_line2    String?
+  city             String?
+  state            String?
+  state_code       String?            @db.VarChar(5)
+  pincode          String?            @db.VarChar(10)
+  country          String             @default("India")
+  created_at       DateTime           @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime           @default(now()) @db.Timestamptz(6)
+  accounting_entry accounting_entry[]
+  bank_account     bank_account[]
+  chart_of_account chart_of_account[]
+  customer         customer[]
+  department       department[]
+  employee         employee[]
+  factory          factory[]
+  vendor           vendor[]
 }
 
 model customer {
@@ -302,6 +321,7 @@ model customer_order_item {
   line_amount            Decimal              @default(0) @db.Decimal(16, 2)
   customer_order         customer_order       @relation(fields: [customer_order_id], references: [customer_order_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_customer_order_item_order")
   inventory_item         inventory_item       @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  delivery_item          delivery_item[]
   sales_invoice_item     sales_invoice_item[]
 }
 
@@ -324,6 +344,7 @@ model delivery {
   customer_order     customer_order?      @relation(fields: [customer_order_id], references: [customer_order_id], onUpdate: NoAction, map: "fk_delivery_order")
   sales_invoice      sales_invoice?       @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onUpdate: NoAction)
   warehouse          warehouse?           @relation(fields: [warehouse_id], references: [warehouse_id], onUpdate: NoAction, map: "fk_delivery_warehouse")
+  delivery_item      delivery_item[]
   weighbridge_ticket weighbridge_ticket[]
 
   @@index([customer_id, delivery_date], map: "idx_delivery_customer_date")
@@ -343,17 +364,18 @@ model department {
 }
 
 model document {
-  document_id    BigInt   @id @default(autoincrement())
-  document_type  String
-  reference_type String?
-  reference_id   BigInt?
-  file_name      String
-  file_url       String?
-  mime_type      String?
-  uploaded_by    BigInt?
-  uploaded_at    DateTime @default(now()) @db.Timestamptz(6)
-  metadata       Json     @default("{}")
-  users          users?   @relation(fields: [uploaded_by], references: [user_id], onUpdate: NoAction, map: "fk_document_uploaded_by")
+  document_id               BigInt                     @id @default(autoincrement())
+  document_type             String
+  reference_type            String?
+  reference_id              BigInt?
+  file_name                 String
+  file_url                  String?
+  mime_type                 String?
+  uploaded_by               BigInt?
+  uploaded_at               DateTime                   @default(now()) @db.Timestamptz(6)
+  metadata                  Json                       @default("{}")
+  users                     users?                     @relation(fields: [uploaded_by], references: [user_id], onUpdate: NoAction, map: "fk_document_uploaded_by")
+  invoice_extraction_review invoice_extraction_review?
 
   @@index([reference_type, reference_id], map: "idx_document_reference")
 }
@@ -507,35 +529,37 @@ model grn_item {
 }
 
 model inventory_item {
-  inventory_item_id      BigInt                   @id @default(autoincrement())
-  item_category_id       BigInt?
-  item_code              String                   @unique
-  item_name              String
-  description            String?
-  item_type              String                   @default("OTHER")
-  hsn_sac_code           String?                  @db.VarChar(20)
-  base_uom               String                   @db.VarChar(20)
-  gst_rate               Decimal                  @default(0) @db.Decimal(6, 3)
-  is_stock_item          Boolean                  @default(true)
-  is_lot_tracked         Boolean                  @default(false)
-  is_active              Boolean                  @default(true)
-  bill_of_material       bill_of_material[]
-  bom_item               bom_item[]
-  customer_order_item    customer_order_item[]
-  expense_item           expense_item[]
-  grn_item               grn_item[]
-  item_category          item_category?           @relation(fields: [item_category_id], references: [item_category_id], onUpdate: NoAction, map: "fk_inventory_item_category")
-  inventory_lot          inventory_lot[]
-  inventory_stock        inventory_stock[]
-  job_work_challan_item  job_work_challan_item[]
-  job_work_receipt_item  job_work_receipt_item[]
-  production_consumption production_consumption[]
-  production_order       production_order[]
-  production_output      production_output[]
-  purchase_order_item    purchase_order_item[]
-  sales_invoice_item     sales_invoice_item[]
-  stock_movement         stock_movement[]
-  vendor_invoice_item    vendor_invoice_item[]
+  inventory_item_id         BigInt                      @id @default(autoincrement())
+  item_category_id          BigInt?
+  item_code                 String                      @unique
+  item_name                 String
+  description               String?
+  item_type                 String                      @default("OTHER")
+  hsn_sac_code              String?                     @db.VarChar(20)
+  base_uom                  String                      @db.VarChar(20)
+  gst_rate                  Decimal                     @default(0) @db.Decimal(6, 3)
+  is_stock_item             Boolean                     @default(true)
+  is_lot_tracked            Boolean                     @default(false)
+  is_active                 Boolean                     @default(true)
+  bill_of_material          bill_of_material[]
+  bom_item                  bom_item[]
+  customer_order_item       customer_order_item[]
+  delivery_item             delivery_item[]
+  expense_item              expense_item[]
+  grn_item                  grn_item[]
+  item_category             item_category?              @relation(fields: [item_category_id], references: [item_category_id], onUpdate: NoAction, map: "fk_inventory_item_category")
+  inventory_lot             inventory_lot[]
+  inventory_stock           inventory_stock[]
+  job_work_challan_item     job_work_challan_item[]
+  job_work_receipt_item     job_work_receipt_item[]
+  production_consumption    production_consumption[]
+  production_order          production_order[]
+  production_output         production_output[]
+  purchase_order_item       purchase_order_item[]
+  purchase_requisition_item purchase_requisition_item[]
+  sales_invoice_item        sales_invoice_item[]
+  stock_movement            stock_movement[]
+  vendor_invoice_item       vendor_invoice_item[]
 
   @@index([item_category_id], map: "idx_inventory_item_category")
 }
@@ -622,24 +646,25 @@ model machine {
 }
 
 model payment {
-  payment_id        BigInt             @id @default(autoincrement())
-  vendor_id         BigInt?
-  customer_id       BigInt?
-  vendor_invoice_id BigInt?
-  sales_invoice_id  BigInt?
-  bank_account_id   BigInt?
-  payment_date      DateTime           @default(dbgenerated("CURRENT_DATE")) @db.Date
-  payment_type      String
-  mode              String             @default("BANK")
-  reference_number  String?
-  amount            Decimal            @db.Decimal(16, 2)
-  remarks           String?
-  bank_transaction  bank_transaction[]
-  bank_account      bank_account?      @relation(fields: [bank_account_id], references: [bank_account_id], onUpdate: NoAction, map: "fk_payment_bank")
-  customer          customer?          @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction, map: "fk_payment_customer")
-  sales_invoice     sales_invoice?     @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onUpdate: NoAction, map: "fk_payment_sales_invoice")
-  vendor            vendor?            @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_payment_vendor")
-  vendor_invoice    vendor_invoice?    @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onUpdate: NoAction, map: "fk_payment_vendor_invoice")
+  payment_id         BigInt               @id @default(autoincrement())
+  vendor_id          BigInt?
+  customer_id        BigInt?
+  vendor_invoice_id  BigInt?
+  sales_invoice_id   BigInt?
+  bank_account_id    BigInt?
+  payment_date       DateTime             @default(dbgenerated("CURRENT_DATE")) @db.Date
+  payment_type       String
+  mode               String               @default("BANK")
+  reference_number   String?
+  amount             Decimal              @db.Decimal(16, 2)
+  remarks            String?
+  bank_transaction   bank_transaction[]
+  bank_account       bank_account?        @relation(fields: [bank_account_id], references: [bank_account_id], onUpdate: NoAction, map: "fk_payment_bank")
+  customer           customer?            @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction, map: "fk_payment_customer")
+  sales_invoice      sales_invoice?       @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onUpdate: NoAction, map: "fk_payment_sales_invoice")
+  vendor             vendor?              @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_payment_vendor")
+  vendor_invoice     vendor_invoice?      @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onUpdate: NoAction, map: "fk_payment_vendor_invoice")
+  payment_allocation payment_allocation[]
 
   @@index([payment_date], map: "idx_payment_date")
 }
@@ -694,6 +719,7 @@ model production_order {
   production_order_id     BigInt                   @id @default(autoincrement())
   production_order_number String                   @unique
   inventory_item_id       BigInt
+  bom_id                  BigInt?
   factory_id              BigInt
   planned_quantity        Decimal                  @db.Decimal(18, 3)
   planned_start_date      DateTime?                @db.Date
@@ -701,6 +727,7 @@ model production_order {
   status                  String                   @default("PLANNED")
   remarks                 String?
   production_consumption  production_consumption[]
+  bill_of_material        bill_of_material?        @relation(fields: [bom_id], references: [bom_id], onDelete: Restrict, onUpdate: NoAction)
   factory                 factory                  @relation(fields: [factory_id], references: [factory_id], onUpdate: NoAction, map: "fk_production_order_factory")
   inventory_item          inventory_item           @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
   production_output       production_output[]
@@ -768,17 +795,20 @@ model purchase_order_item {
 }
 
 model purchase_requisition {
-  purchase_requisition_id BigInt           @id @default(autoincrement())
-  requisition_number      String           @unique
-  department_id           BigInt?
-  requested_by            BigInt?
-  requisition_date        DateTime         @default(dbgenerated("CURRENT_DATE")) @db.Date
-  required_date           DateTime?        @db.Date
-  status                  String           @default("DRAFT")
-  remarks                 String?
-  purchase_order          purchase_order[]
-  department              department?      @relation(fields: [department_id], references: [department_id], onUpdate: NoAction)
-  users                   users?           @relation(fields: [requested_by], references: [user_id], onUpdate: NoAction, map: "fk_purchase_req_user")
+  purchase_requisition_id   BigInt                      @id @default(autoincrement())
+  requisition_number        String                      @unique
+  department_id             BigInt?
+  requested_by              BigInt?
+  requisition_date          DateTime                    @default(dbgenerated("CURRENT_DATE")) @db.Date
+  required_date             DateTime?                   @db.Date
+  status                    String                      @default("DRAFT")
+  remarks                   String?
+  purchase_order            purchase_order[]
+  department                department?                 @relation(fields: [department_id], references: [department_id], onUpdate: NoAction)
+  users                     users?                      @relation(fields: [requested_by], references: [user_id], onUpdate: NoAction, map: "fk_purchase_req_user")
+  purchase_requisition_item purchase_requisition_item[]
+
+  @@index([requisition_date], map: "idx_purchase_requisition_date")
 }
 
 model role {
@@ -873,26 +903,28 @@ model stock_movement {
 }
 
 model users {
-  user_id              BigInt                 @id @default(autoincrement())
-  employee_id          BigInt?                @unique
-  role_id              BigInt?
-  username             String                 @unique
-  password_hash        String
-  is_active            Boolean                @default(true)
-  last_login_at        DateTime?              @db.Timestamptz(6)
-  created_at           DateTime               @default(now()) @db.Timestamptz(6)
-  updated_at           DateTime               @default(now()) @db.Timestamptz(6)
-  accounting_entry     accounting_entry[]
-  approval_action      approval_action[]
-  audit_log            audit_log[]
-  document             document[]
-  grn                  grn[]
-  job_work_receipt     job_work_receipt[]
-  journal_entry        journal_entry[]
-  leave                leave[]
-  purchase_requisition purchase_requisition[]
-  employee             employee?              @relation(fields: [employee_id], references: [employee_id], onUpdate: NoAction, map: "fk_users_employee")
-  role                 role?                  @relation(fields: [role_id], references: [role_id], onUpdate: NoAction)
+  user_id                   BigInt                      @id @default(autoincrement())
+  employee_id               BigInt?                     @unique
+  role_id                   BigInt?
+  username                  String                      @unique
+  password_hash             String
+  is_active                 Boolean                     @default(true)
+  last_login_at             DateTime?                   @db.Timestamptz(6)
+  created_at                DateTime                    @default(now()) @db.Timestamptz(6)
+  updated_at                DateTime                    @default(now()) @db.Timestamptz(6)
+  accounting_entry          accounting_entry[]
+  approval_action           approval_action[]
+  approval_request          approval_request[]
+  audit_log                 audit_log[]
+  document                  document[]
+  grn                       grn[]
+  invoice_extraction_review invoice_extraction_review[]
+  job_work_receipt          job_work_receipt[]
+  journal_entry             journal_entry[]
+  leave                     leave[]
+  purchase_requisition      purchase_requisition[]
+  employee                  employee?                   @relation(fields: [employee_id], references: [employee_id], onUpdate: NoAction, map: "fk_users_employee")
+  role                      role?                       @relation(fields: [role_id], references: [role_id], onUpdate: NoAction)
 }
 
 model vendor {
@@ -1064,6 +1096,7 @@ model inventory_lot {
   rejected_quantity      Decimal                  @default(0) @db.Decimal(18, 3)
   status                 String                   @default("OPEN")
   remarks                String?
+  delivery_item          delivery_item[]
   grn_item               grn_item[]
   inventory_item         inventory_item           @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
   vendor                 vendor?                  @relation(fields: [supplier_id], references: [vendor_id], onUpdate: NoAction)
@@ -1209,6 +1242,7 @@ model sales_invoice_item {
   igst_amount            Decimal              @default(0) @db.Decimal(16, 2)
   cess_amount            Decimal              @default(0) @db.Decimal(16, 2)
   line_total             Decimal              @default(0) @db.Decimal(16, 2)
+  delivery_item          delivery_item[]
   customer_order_item    customer_order_item? @relation(fields: [customer_order_item_id], references: [customer_order_item_id], onUpdate: NoAction)
   inventory_item         inventory_item?      @relation(fields: [inventory_item_id], references: [inventory_item_id], onDelete: Restrict, onUpdate: NoAction)
   sales_invoice          sales_invoice        @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onDelete: Cascade, onUpdate: NoAction)
@@ -1257,4 +1291,106 @@ model weighbridge_ticket {
   job_work_challan      job_work_challan? @relation(fields: [job_work_challan_id], references: [job_work_challan_id], onUpdate: NoAction)
 
   @@index([vehicle_number, ticket_date], map: "idx_weighbridge_vehicle_date")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model approval_request {
+  approval_request_id  BigInt            @id @default(autoincrement())
+  approval_workflow_id BigInt
+  transaction_type     String
+  transaction_id       BigInt
+  requester_id         BigInt?
+  current_step_number  Int               @default(1)
+  status               String            @default("PENDING")
+  submitted_at         DateTime          @default(now()) @db.Timestamptz(6)
+  completed_at         DateTime?         @db.Timestamptz(6)
+  remarks              String?
+  approval_action      approval_action[]
+  approval_workflow    approval_workflow @relation(fields: [approval_workflow_id], references: [approval_workflow_id], onUpdate: NoAction)
+  users                users?            @relation(fields: [requester_id], references: [user_id], onUpdate: NoAction)
+
+  @@index([status], map: "idx_approval_request_status")
+  @@index([transaction_type, transaction_id], map: "idx_approval_request_transaction")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model delivery_item {
+  delivery_item_id       BigInt               @id @default(autoincrement())
+  delivery_id            BigInt
+  customer_order_item_id BigInt?
+  sales_invoice_item_id  BigInt?
+  inventory_item_id      BigInt
+  lot_id                 BigInt?
+  description            String?
+  uom                    String               @db.VarChar(20)
+  ordered_quantity       Decimal              @default(0) @db.Decimal(18, 3)
+  delivered_quantity     Decimal              @db.Decimal(18, 3)
+  weight_kg              Decimal?             @db.Decimal(18, 3)
+  remarks                String?
+  customer_order_item    customer_order_item? @relation(fields: [customer_order_item_id], references: [customer_order_item_id], onUpdate: NoAction)
+  delivery               delivery             @relation(fields: [delivery_id], references: [delivery_id], onDelete: Cascade, onUpdate: NoAction)
+  inventory_item         inventory_item       @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  inventory_lot          inventory_lot?       @relation(fields: [lot_id], references: [lot_id], onUpdate: NoAction)
+  sales_invoice_item     sales_invoice_item?  @relation(fields: [sales_invoice_item_id], references: [sales_invoice_item_id], onUpdate: NoAction)
+
+  @@index([delivery_id], map: "idx_delivery_item_delivery")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model invoice_extraction_review {
+  invoice_extraction_review_id BigInt    @id @default(autoincrement())
+  document_id                  BigInt    @unique
+  extraction_status            String    @default("PENDING")
+  extraction_engine            String?
+  extraction_version           String?
+  raw_ocr_output               Json?
+  extracted_fields             Json?
+  confidence_score             Decimal?  @db.Decimal(6, 5)
+  validation_errors            Json?
+  reviewer_id                  BigInt?
+  reviewer_decision            String?
+  reviewed_at                  DateTime? @db.Timestamptz(6)
+  review_notes                 String?
+  created_at                   DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at                   DateTime  @default(now()) @db.Timestamptz(6)
+  document                     document  @relation(fields: [document_id], references: [document_id], onDelete: Cascade, onUpdate: NoAction)
+  users                        users?    @relation(fields: [reviewer_id], references: [user_id], onUpdate: NoAction)
+
+  @@index([extraction_status], map: "idx_invoice_extraction_status")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+model payment_allocation {
+  payment_allocation_id  BigInt               @id @default(autoincrement())
+  payment_id             BigInt
+  accounts_payable_id    BigInt?
+  accounts_receivable_id BigInt?
+  allocated_amount       Decimal              @db.Decimal(16, 2)
+  allocated_at           DateTime             @default(now()) @db.Timestamptz(6)
+  remarks                String?
+  accounts_payable       accounts_payable?    @relation(fields: [accounts_payable_id], references: [accounts_payable_id], onDelete: Restrict, onUpdate: NoAction)
+  accounts_receivable    accounts_receivable? @relation(fields: [accounts_receivable_id], references: [accounts_receivable_id], onDelete: Restrict, onUpdate: NoAction)
+  payment                payment              @relation(fields: [payment_id], references: [payment_id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([accounts_payable_id], map: "idx_payment_allocation_payable")
+  @@index([payment_id], map: "idx_payment_allocation_payment")
+  @@index([accounts_receivable_id], map: "idx_payment_allocation_receivable")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model purchase_requisition_item {
+  purchase_requisition_item_id BigInt               @id @default(autoincrement())
+  purchase_requisition_id      BigInt
+  inventory_item_id            BigInt
+  description                  String?
+  uom                          String               @db.VarChar(20)
+  requested_quantity           Decimal              @db.Decimal(18, 3)
+  required_date                DateTime?            @db.Date
+  remarks                      String?
+  inventory_item               inventory_item       @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  purchase_requisition         purchase_requisition @relation(fields: [purchase_requisition_id], references: [purchase_requisition_id], onDelete: Cascade, onUpdate: NoAction)
 }
