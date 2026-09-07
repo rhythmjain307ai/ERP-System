@@ -507,23 +507,24 @@ model grn {
 }
 
 model grn_item {
-  grn_item_id            BigInt               @id @default(autoincrement())
-  grn_id                 BigInt
-  purchase_order_item_id BigInt?
-  inventory_item_id      BigInt
-  lot_id                 BigInt?
-  heat_number            String?
-  uom                    String               @db.VarChar(20)
-  challan_quantity       Decimal              @default(0) @db.Decimal(18, 3)
-  received_quantity      Decimal              @default(0) @db.Decimal(18, 3)
-  accepted_quantity      Decimal              @default(0) @db.Decimal(18, 3)
-  rejected_quantity      Decimal              @default(0) @db.Decimal(18, 3)
-  rejection_reason       String?
-  rate                   Decimal              @default(0) @db.Decimal(18, 4)
-  grn                    grn                  @relation(fields: [grn_id], references: [grn_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_grn_item_grn")
-  inventory_item         inventory_item       @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
-  inventory_lot          inventory_lot?       @relation(fields: [lot_id], references: [lot_id], onUpdate: NoAction)
-  purchase_order_item    purchase_order_item? @relation(fields: [purchase_order_item_id], references: [purchase_order_item_id], onUpdate: NoAction)
+  grn_item_id              BigInt                     @id @default(autoincrement())
+  grn_id                   BigInt
+  purchase_order_item_id   BigInt?
+  inventory_item_id        BigInt
+  lot_id                   BigInt?
+  heat_number              String?
+  uom                      String                     @db.VarChar(20)
+  challan_quantity         Decimal                    @default(0) @db.Decimal(18, 3)
+  received_quantity        Decimal                    @default(0) @db.Decimal(18, 3)
+  accepted_quantity        Decimal                    @default(0) @db.Decimal(18, 3)
+  rejected_quantity        Decimal                    @default(0) @db.Decimal(18, 3)
+  rejection_reason         String?
+  rate                     Decimal                    @default(0) @db.Decimal(18, 4)
+  grn                      grn                        @relation(fields: [grn_id], references: [grn_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_grn_item_grn")
+  inventory_item           inventory_item             @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  inventory_lot            inventory_lot?             @relation(fields: [lot_id], references: [lot_id], onUpdate: NoAction)
+  purchase_order_item      purchase_order_item?       @relation(fields: [purchase_order_item_id], references: [purchase_order_item_id], onUpdate: NoAction)
+  vendor_invoice_grn_match vendor_invoice_grn_match[]
 
   @@index([heat_number], map: "idx_grn_item_heat")
 }
@@ -649,8 +650,6 @@ model payment {
   payment_id         BigInt               @id @default(autoincrement())
   vendor_id          BigInt?
   customer_id        BigInt?
-  vendor_invoice_id  BigInt?
-  sales_invoice_id   BigInt?
   bank_account_id    BigInt?
   payment_date       DateTime             @default(dbgenerated("CURRENT_DATE")) @db.Date
   payment_type       String
@@ -661,9 +660,7 @@ model payment {
   bank_transaction   bank_transaction[]
   bank_account       bank_account?        @relation(fields: [bank_account_id], references: [bank_account_id], onUpdate: NoAction, map: "fk_payment_bank")
   customer           customer?            @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction, map: "fk_payment_customer")
-  sales_invoice      sales_invoice?       @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onUpdate: NoAction, map: "fk_payment_sales_invoice")
   vendor             vendor?              @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_payment_vendor")
-  vendor_invoice     vendor_invoice?      @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onUpdate: NoAction, map: "fk_payment_vendor_invoice")
   payment_allocation payment_allocation[]
 
   @@index([payment_date], map: "idx_payment_date")
@@ -873,7 +870,6 @@ model sales_invoice {
   notes                 String?
   accounts_receivable   accounts_receivable?
   delivery              delivery[]
-  payment               payment[]
   customer              customer             @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction, map: "fk_sales_invoice_customer")
   customer_order        customer_order?      @relation(fields: [customer_order_id], references: [customer_order_id], onUpdate: NoAction, map: "fk_sales_invoice_order")
   sales_invoice_item    sales_invoice_item[]
@@ -985,13 +981,25 @@ model vendor_invoice {
   status              String                @default("BOOKED")
   accounts_payable    accounts_payable?
   grn                 grn[]
-  payment             payment[]
   purchase_order      purchase_order?       @relation(fields: [purchase_order_id], references: [purchase_order_id], onUpdate: NoAction, map: "fk_vendor_invoice_po")
   vendor              vendor                @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_vendor_invoice_vendor")
   vendor_invoice_item vendor_invoice_item[]
 
   @@unique([vendor_id, invoice_number])
   @@index([invoice_date], map: "idx_vendor_invoice_date")
+}
+
+model vendor_invoice_grn_match {
+  vendor_invoice_grn_match_id BigInt              @id @default(autoincrement())
+  vendor_invoice_item_id      BigInt
+  grn_item_id                 BigInt
+  matched_quantity            Decimal             @db.Decimal(18, 3)
+  remarks                     String?
+  grn_item                    grn_item            @relation(fields: [grn_item_id], references: [grn_item_id], onUpdate: NoAction, map: "fk_vendor_invoice_grn_match_grn_item")
+  vendor_invoice_item         vendor_invoice_item @relation(fields: [vendor_invoice_item_id], references: [vendor_invoice_item_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_vendor_invoice_grn_match_invoice_item")
+
+  @@unique([vendor_invoice_item_id, grn_item_id], map: "uq_vendor_invoice_grn_match")
+  @@index([grn_item_id], map: "idx_vendor_invoice_grn_match_grn")
 }
 
 model vendor_ledger {
@@ -1250,25 +1258,26 @@ model sales_invoice_item {
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model vendor_invoice_item {
-  vendor_invoice_item_id BigInt               @id @default(autoincrement())
-  vendor_invoice_id      BigInt
-  purchase_order_item_id BigInt?
-  inventory_item_id      BigInt?
-  description            String
-  hsn_sac_code           String?              @db.VarChar(20)
-  uom                    String               @db.VarChar(20)
-  quantity               Decimal              @default(0) @db.Decimal(18, 3)
-  unit_price             Decimal              @default(0) @db.Decimal(18, 4)
-  discount_amount        Decimal              @default(0) @db.Decimal(16, 2)
-  taxable_amount         Decimal              @default(0) @db.Decimal(16, 2)
-  gst_rate               Decimal              @default(0) @db.Decimal(6, 3)
-  cgst_amount            Decimal              @default(0) @db.Decimal(16, 2)
-  sgst_amount            Decimal              @default(0) @db.Decimal(16, 2)
-  igst_amount            Decimal              @default(0) @db.Decimal(16, 2)
-  line_total             Decimal              @default(0) @db.Decimal(16, 2)
-  inventory_item         inventory_item?      @relation(fields: [inventory_item_id], references: [inventory_item_id], onDelete: Restrict, onUpdate: NoAction)
-  purchase_order_item    purchase_order_item? @relation(fields: [purchase_order_item_id], references: [purchase_order_item_id], onUpdate: NoAction)
-  vendor_invoice         vendor_invoice       @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onDelete: Cascade, onUpdate: NoAction)
+  vendor_invoice_item_id   BigInt                     @id @default(autoincrement())
+  vendor_invoice_id        BigInt
+  purchase_order_item_id   BigInt?
+  inventory_item_id        BigInt?
+  description              String
+  hsn_sac_code             String?                    @db.VarChar(20)
+  uom                      String                     @db.VarChar(20)
+  quantity                 Decimal                    @default(0) @db.Decimal(18, 3)
+  unit_price               Decimal                    @default(0) @db.Decimal(18, 4)
+  discount_amount          Decimal                    @default(0) @db.Decimal(16, 2)
+  taxable_amount           Decimal                    @default(0) @db.Decimal(16, 2)
+  gst_rate                 Decimal                    @default(0) @db.Decimal(6, 3)
+  cgst_amount              Decimal                    @default(0) @db.Decimal(16, 2)
+  sgst_amount              Decimal                    @default(0) @db.Decimal(16, 2)
+  igst_amount              Decimal                    @default(0) @db.Decimal(16, 2)
+  line_total               Decimal                    @default(0) @db.Decimal(16, 2)
+  vendor_invoice_grn_match vendor_invoice_grn_match[]
+  inventory_item           inventory_item?            @relation(fields: [inventory_item_id], references: [inventory_item_id], onDelete: Restrict, onUpdate: NoAction)
+  purchase_order_item      purchase_order_item?       @relation(fields: [purchase_order_item_id], references: [purchase_order_item_id], onUpdate: NoAction)
+  vendor_invoice           vendor_invoice             @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onDelete: Cascade, onUpdate: NoAction)
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
