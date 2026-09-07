@@ -1306,10 +1306,12 @@ model approval_request {
   submitted_at         DateTime          @default(now()) @db.Timestamptz(6)
   completed_at         DateTime?         @db.Timestamptz(6)
   remarks              String?
+  request_version      Int               @default(1)
   approval_action      approval_action[]
   approval_workflow    approval_workflow @relation(fields: [approval_workflow_id], references: [approval_workflow_id], onUpdate: NoAction)
   users                users?            @relation(fields: [requester_id], references: [user_id], onUpdate: NoAction)
 
+  @@unique([transaction_type, transaction_id, request_version], map: "uq_approval_request_transaction_version")
   @@index([status], map: "idx_approval_request_status")
   @@index([transaction_type, transaction_id], map: "idx_approval_request_transaction")
 }
