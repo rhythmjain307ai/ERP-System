@@ -8,112 +8,117 @@ datasource db {
 }
 
 model accounting_entry {
-  accounting_entry_id                                                   BigInt           @id @default(autoincrement())
-  company_id                                                            BigInt
-  transaction_date                                                      DateTime         @default(now()) @db.Timestamptz(6)
-  reference_type                                                        String?
-  reference_id                                                          BigInt?
-  debit_account_id                                                      BigInt
-  credit_account_id                                                     BigInt
-  amount                                                                Decimal          @db.Decimal(14, 2)
-  description                                                           String?
-  created_by                                                            BigInt?
-  company                                                               company          @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_accounting_entry_company")
-  chart_of_account_accounting_entry_credit_account_idTochart_of_account chart_of_account @relation("accounting_entry_credit_account_idTochart_of_account", fields: [credit_account_id], references: [account_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_accounting_entry_credit")
-  chart_of_account_accounting_entry_debit_account_idTochart_of_account  chart_of_account @relation("accounting_entry_debit_account_idTochart_of_account", fields: [debit_account_id], references: [account_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_accounting_entry_debit")
-  users                                                                 users?           @relation(fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_accounting_entry_user")
-
-  @@index([transaction_date], map: "idx_accounting_entry_date")
+  accounting_entry_id BigInt          @id @default(autoincrement())
+  entry_date          DateTime        @default(dbgenerated("CURRENT_DATE")) @db.Date
+  source_type         String?
+  source_id           BigInt?
+  description         String?
+  status              String          @default("POSTED")
+  created_by          BigInt?
+  created_at          DateTime        @default(now()) @db.Timestamptz(6)
+  users               users?          @relation(fields: [created_by], references: [user_id], onUpdate: NoAction, map: "fk_accounting_entry_user")
+  journal_entry       journal_entry[]
 }
 
 model accounts_payable {
   accounts_payable_id BigInt          @id @default(autoincrement())
   vendor_id           BigInt
-  vendor_invoice_id   BigInt?
-  invoice_date        DateTime?       @db.Date
+  vendor_invoice_id   BigInt?         @unique
+  expense_id          BigInt?
   due_date            DateTime?       @db.Date
-  invoice_amount      Decimal         @db.Decimal(14, 2)
-  paid_amount         Decimal         @default(0) @db.Decimal(14, 2)
+  invoice_amount      Decimal         @default(0) @db.Decimal(16, 2)
+  paid_amount         Decimal         @default(0) @db.Decimal(16, 2)
+  outstanding_amount  Decimal         @default(0) @db.Decimal(16, 2)
   status              String          @default("OPEN")
-  vendor_invoice      vendor_invoice? @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_ap_invoice")
-  vendor              vendor          @relation(fields: [vendor_id], references: [vendor_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_ap_vendor")
+  expense             expense?        @relation(fields: [expense_id], references: [expense_id], onUpdate: NoAction)
+  vendor              vendor          @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_ap_vendor")
+  vendor_invoice      vendor_invoice? @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onUpdate: NoAction, map: "fk_ap_invoice")
+
+  @@index([vendor_id, status], map: "idx_payable_vendor_status")
 }
 
 model accounts_receivable {
   accounts_receivable_id BigInt         @id @default(autoincrement())
   customer_id            BigInt
-  sales_invoice_id       BigInt?
-  invoice_date           DateTime?      @db.Date
+  sales_invoice_id       BigInt?        @unique
   due_date               DateTime?      @db.Date
-  invoice_amount         Decimal        @db.Decimal(14, 2)
-  received_amount        Decimal        @default(0) @db.Decimal(14, 2)
+  invoice_amount         Decimal        @default(0) @db.Decimal(16, 2)
+  received_amount        Decimal        @default(0) @db.Decimal(16, 2)
+  outstanding_amount     Decimal        @default(0) @db.Decimal(16, 2)
   status                 String         @default("OPEN")
-  customer               customer       @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_ar_customer")
-  sales_invoice          sales_invoice? @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_ar_invoice")
+  customer               customer       @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction, map: "fk_ar_customer")
+  sales_invoice          sales_invoice? @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onUpdate: NoAction, map: "fk_ar_invoice")
+
+  @@index([customer_id, status], map: "idx_receivable_customer_status")
 }
 
 model approval_action {
-  approval_action_id BigInt        @id @default(autoincrement())
-  approval_step_id   BigInt
-  user_id            BigInt
-  action             String
-  action_date        DateTime      @default(now()) @db.Timestamptz(6)
-  comments           String?
-  approval_step      approval_step @relation(fields: [approval_step_id], references: [approval_step_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_approval_action_step")
-  users              users         @relation(fields: [user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_approval_action_user")
+  approval_action_id   BigInt            @id @default(autoincrement())
+  approval_workflow_id BigInt
+  approval_step_id     BigInt?
+  transaction_type     String
+  transaction_id       BigInt
+  action_by            BigInt?
+  action               String
+  action_at            DateTime          @default(now()) @db.Timestamptz(6)
+  comments             String?
+  users                users?            @relation(fields: [action_by], references: [user_id], onUpdate: NoAction)
+  approval_step        approval_step?    @relation(fields: [approval_step_id], references: [approval_step_id], onUpdate: NoAction, map: "fk_approval_action_step")
+  approval_workflow    approval_workflow @relation(fields: [approval_workflow_id], references: [approval_workflow_id], onDelete: Cascade, onUpdate: NoAction)
 }
 
 model approval_step {
   approval_step_id     BigInt            @id @default(autoincrement())
   approval_workflow_id BigInt
   step_number          Int
-  role_id              BigInt
-  status               String            @default("PENDING")
+  role_id              BigInt?
+  step_name            String
+  is_mandatory         Boolean           @default(true)
   approval_action      approval_action[]
-  role                 role              @relation(fields: [role_id], references: [role_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_approval_step_role")
   approval_workflow    approval_workflow @relation(fields: [approval_workflow_id], references: [approval_workflow_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_approval_step_workflow")
+  role                 role?             @relation(fields: [role_id], references: [role_id], onUpdate: NoAction, map: "fk_approval_step_role")
 
-  @@unique([approval_workflow_id, step_number], map: "uq_approval_step")
+  @@unique([approval_workflow_id, step_number])
 }
 
 model approval_workflow {
-  approval_workflow_id BigInt          @id @default(autoincrement())
-  workflow_name        String
+  approval_workflow_id BigInt            @id @default(autoincrement())
+  workflow_name        String            @unique
   transaction_type     String
-  transaction_id       BigInt
-  current_step         Int             @default(1)
-  status               String          @default("PENDING")
-  created_at           DateTime        @default(now()) @db.Timestamptz(6)
+  is_active            Boolean           @default(true)
+  approval_action      approval_action[]
   approval_step        approval_step[]
-
-  @@unique([transaction_type, transaction_id], map: "uq_approval_transaction")
 }
 
 model attendance {
-  attendance_id   BigInt   @id @default(autoincrement())
+  attendance_id   BigInt    @id @default(autoincrement())
   employee_id     BigInt
-  attendance_date DateTime @db.Date
-  scheduled_hours Decimal? @db.Decimal(8, 2)
-  actual_hours    Decimal? @db.Decimal(8, 2)
-  overtime_hours  Decimal  @default(0) @db.Decimal(8, 2)
-  status          String?
+  attendance_date DateTime  @db.Date
+  scheduled_hours Decimal   @default(0) @db.Decimal(6, 2)
+  actual_hours    Decimal   @default(0) @db.Decimal(6, 2)
+  overtime_hours  Decimal   @default(0) @db.Decimal(6, 2)
+  deduction_hours Decimal   @default(0) @db.Decimal(6, 2)
+  status          String    @default("PRESENT")
+  check_in        DateTime? @db.Timestamptz(6)
+  check_out       DateTime? @db.Timestamptz(6)
   remarks         String?
-  employee        employee @relation(fields: [employee_id], references: [employee_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_attendance_employee")
+  employee        employee  @relation(fields: [employee_id], references: [employee_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_attendance_employee")
 
-  @@unique([employee_id, attendance_date], map: "uq_attendance_employee_date")
-  @@index([employee_id, attendance_date], map: "idx_attendance_employee_date")
+  @@unique([employee_id, attendance_date])
+  @@index([attendance_date], map: "idx_attendance_date")
 }
 
 model audit_log {
   audit_log_id BigInt   @id @default(autoincrement())
   user_id      BigInt?
+  action       String
   table_name   String
   record_id    BigInt?
-  action       String
   old_values   Json?
   new_values   Json?
+  ip_address   String?  @db.Inet
   created_at   DateTime @default(now()) @db.Timestamptz(6)
-  users        users?   @relation(fields: [user_id], references: [user_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_audit_log_user")
+  users        users?   @relation(fields: [user_id], references: [user_id], onUpdate: NoAction, map: "fk_audit_log_user")
 
   @@index([table_name, record_id], map: "idx_audit_log_table_record")
 }
@@ -123,93 +128,98 @@ model bank_account {
   company_id       BigInt
   bank_name        String
   account_name     String?
-  account_number   String?
+  account_number   String
   ifsc_code        String?
-  opening_balance  Decimal            @default(0) @db.Decimal(14, 2)
-  current_balance  Decimal            @default(0) @db.Decimal(14, 2)
-  company          company            @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_bank_account_company")
+  branch_name      String?
+  opening_balance  Decimal            @default(0) @db.Decimal(16, 2)
+  current_balance  Decimal            @default(0) @db.Decimal(16, 2)
+  is_active        Boolean            @default(true)
+  company          company            @relation(fields: [company_id], references: [company_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_bank_account_company")
   bank_transaction bank_transaction[]
   payment          payment[]
+
+  @@unique([company_id, account_number])
 }
 
 model bank_transaction {
   bank_transaction_id BigInt       @id @default(autoincrement())
   bank_account_id     BigInt
-  transaction_date    DateTime     @default(now()) @db.Timestamptz(6)
+  payment_id          BigInt?
+  transaction_date    DateTime     @default(dbgenerated("CURRENT_DATE")) @db.Date
   transaction_type    String
-  amount              Decimal      @db.Decimal(14, 2)
+  amount              Decimal      @db.Decimal(16, 2)
   reference_number    String?
   description         String?
-  bank_account        bank_account @relation(fields: [bank_account_id], references: [bank_account_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_bank_transaction_account")
+  running_balance     Decimal?     @db.Decimal(16, 2)
+  bank_account        bank_account @relation(fields: [bank_account_id], references: [bank_account_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_bank_transaction_account")
+  payment             payment?     @relation(fields: [payment_id], references: [payment_id], onUpdate: NoAction)
+
+  @@index([transaction_date], map: "idx_bank_transaction_date")
 }
 
 model bill_of_material {
-  bom_id          BigInt         @id @default(autoincrement())
-  product_item_id BigInt
-  version         String
-  is_active       Boolean        @default(true)
-  created_at      DateTime       @default(now()) @db.Timestamptz(6)
-  inventory_item  inventory_item @relation(fields: [product_item_id], references: [item_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_bom_product")
-  bom_item        bom_item[]
+  bom_id           BigInt         @id @default(autoincrement())
+  finished_item_id BigInt
+  bom_code         String         @unique
+  version          String         @default("1")
+  is_active        Boolean        @default(true)
+  effective_from   DateTime?      @db.Date
+  effective_to     DateTime?      @db.Date
+  inventory_item   inventory_item @relation(fields: [finished_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  bom_item         bom_item[]
 
-  @@unique([product_item_id, version], map: "uq_bom_product_version")
+  @@unique([finished_item_id, version])
 }
 
 model bom_item {
-  bom_item_id          BigInt           @id @default(autoincrement())
-  bom_id               BigInt
-  raw_material_item_id BigInt
-  quantity_required    Decimal          @db.Decimal(14, 3)
-  unit_of_measure      String?
-  bill_of_material     bill_of_material @relation(fields: [bom_id], references: [bom_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_bom_item_bom")
-  inventory_item       inventory_item   @relation(fields: [raw_material_item_id], references: [item_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_bom_item_raw_material")
+  bom_item_id       BigInt           @id @default(autoincrement())
+  bom_id            BigInt
+  component_item_id BigInt
+  quantity_per_unit Decimal          @db.Decimal(18, 6)
+  uom               String           @db.VarChar(20)
+  scrap_percentage  Decimal          @default(0) @db.Decimal(7, 3)
+  bill_of_material  bill_of_material @relation(fields: [bom_id], references: [bom_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_bom_item_bom")
+  inventory_item    inventory_item   @relation(fields: [component_item_id], references: [inventory_item_id], onUpdate: NoAction)
+
+  @@unique([bom_id, component_item_id])
 }
 
 model chart_of_account {
-  account_id                                                            BigInt             @id @default(autoincrement())
-  company_id                                                            BigInt
-  parent_account_id                                                     BigInt?
-  account_code                                                          String
-  account_name                                                          String
-  account_type                                                          String
-  is_active                                                             Boolean            @default(true)
-  accounting_entry_accounting_entry_credit_account_idTochart_of_account accounting_entry[] @relation("accounting_entry_credit_account_idTochart_of_account")
-  accounting_entry_accounting_entry_debit_account_idTochart_of_account  accounting_entry[] @relation("accounting_entry_debit_account_idTochart_of_account")
-  company                                                               company            @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_chart_account_company")
-  chart_of_account                                                      chart_of_account?  @relation("chart_of_accountTochart_of_account", fields: [parent_account_id], references: [account_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_chart_account_parent")
-  other_chart_of_account                                                chart_of_account[] @relation("chart_of_accountTochart_of_account")
-  journal_line                                                          journal_line[]
-
-  @@unique([company_id, account_code], map: "uq_chart_account_company_code")
+  account_id             BigInt             @id @default(autoincrement())
+  account_code           String             @unique
+  account_name           String
+  account_type           String
+  parent_account_id      BigInt?
+  is_active              Boolean            @default(true)
+  chart_of_account       chart_of_account?  @relation("chart_of_accountTochart_of_account", fields: [parent_account_id], references: [account_id], onUpdate: NoAction, map: "fk_chart_account_parent")
+  other_chart_of_account chart_of_account[] @relation("chart_of_accountTochart_of_account")
+  journal_line           journal_line[]
 }
 
 model company {
-  company_id           BigInt                 @id @default(autoincrement())
-  company_name         String
-  address              String?
-  city                 String?
-  state                String?
-  country              String?
-  phone                String?
-  email                String?
-  tax_id               String?
-  created_at           DateTime               @default(now()) @db.Timestamptz(6)
-  accounting_entry     accounting_entry[]
-  bank_account         bank_account[]
-  chart_of_account     chart_of_account[]
-  customer             customer[]
-  customer_order       customer_order[]
-  department           department[]
-  employee             employee[]
-  expense              expense[]
-  factory              factory[]
-  inventory_item       inventory_item[]
-  journal_entry        journal_entry[]
-  payment              payment[]
-  production_order     production_order[]
-  purchase_order       purchase_order[]
-  purchase_requisition purchase_requisition[]
-  vendor               vendor[]
+  company_id    BigInt         @id @default(autoincrement())
+  company_name  String
+  legal_name    String?
+  gstin         String?        @unique @db.VarChar(15)
+  pan           String?        @db.VarChar(10)
+  cin           String?        @db.VarChar(21)
+  email         String?
+  phone         String?
+  address_line1 String?
+  address_line2 String?
+  city          String?
+  state         String?
+  state_code    String?        @db.VarChar(5)
+  pincode       String?        @db.VarChar(10)
+  country       String         @default("India")
+  created_at    DateTime       @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime       @default(now()) @db.Timestamptz(6)
+  bank_account  bank_account[]
+  customer      customer[]
+  department    department[]
+  employee      employee[]
+  factory       factory[]
+  vendor        vendor[]
 }
 
 model customer {
@@ -217,282 +227,358 @@ model customer {
   company_id          BigInt
   customer_code       String
   customer_name       String
-  contact_person      String?
-  phone               String?
+  gstin               String?               @db.VarChar(15)
+  pan                 String?               @db.VarChar(10)
   email               String?
-  address             String?
+  phone               String?
+  billing_address     String?
+  shipping_address    String?
   city                String?
   state               String?
-  tax_id              String?
-  credit_limit        Decimal?              @db.Decimal(14, 2)
-  created_at          DateTime              @default(now()) @db.Timestamptz(6)
+  state_code          String?               @db.VarChar(5)
+  pincode             String?               @db.VarChar(10)
+  payment_terms_days  Int                   @default(0)
+  credit_limit        Decimal               @default(0) @db.Decimal(16, 2)
+  is_active           Boolean               @default(true)
   accounts_receivable accounts_receivable[]
-  company             company               @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_customer_company")
+  company             company               @relation(fields: [company_id], references: [company_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_customer_company")
   customer_ledger     customer_ledger[]
   customer_order      customer_order[]
+  delivery            delivery[]
   payment             payment[]
   sales_invoice       sales_invoice[]
 
-  @@unique([company_id, customer_code], map: "uq_customer_company_code")
+  @@unique([company_id, customer_code])
+  @@index([gstin], map: "idx_customer_gstin")
 }
 
 model customer_ledger {
   customer_ledger_id BigInt   @id @default(autoincrement())
   customer_id        BigInt
-  transaction_date   DateTime @default(now()) @db.Timestamptz(6)
-  transaction_type   String
+  transaction_date   DateTime @db.Date
+  reference_type     String
   reference_id       BigInt?
-  debit_amount       Decimal  @default(0) @db.Decimal(14, 2)
-  credit_amount      Decimal  @default(0) @db.Decimal(14, 2)
+  debit_amount       Decimal  @default(0) @db.Decimal(16, 2)
+  credit_amount      Decimal  @default(0) @db.Decimal(16, 2)
   description        String?
-  customer           customer @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_customer_ledger_customer")
+  customer           customer @relation(fields: [customer_id], references: [customer_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_customer_ledger_customer")
 }
 
 model customer_order {
   customer_order_id   BigInt                @id @default(autoincrement())
-  company_id          BigInt
-  factory_id          BigInt?
+  order_number        String                @unique
   customer_id         BigInt
-  order_number        String
   order_date          DateTime              @default(dbgenerated("CURRENT_DATE")) @db.Date
-  delivery_date       DateTime?             @db.Date
-  status              String                @default("PENDING")
-  subtotal            Decimal               @default(0) @db.Decimal(14, 2)
-  tax_amount          Decimal               @default(0) @db.Decimal(14, 2)
-  total_amount        Decimal               @default(0) @db.Decimal(14, 2)
-  company             company               @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_customer_order_company")
-  customer            customer              @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_customer_order_customer")
-  factory             factory?              @relation(fields: [factory_id], references: [factory_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_customer_order_factory")
+  buyer_order_number  String?
+  buyer_order_date    DateTime?             @db.Date
+  order_type          String                @default("SALES")
+  payment_terms       String?
+  bill_to_address     String?
+  ship_to_address     String?
+  consignee_name      String?
+  consignee_address   String?
+  place_of_supply     String?
+  status              String                @default("OPEN")
+  remarks             String?
+  customer            customer              @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction, map: "fk_customer_order_customer")
   customer_order_item customer_order_item[]
   delivery            delivery[]
+  job_work_order      job_work_order[]
   sales_invoice       sales_invoice[]
 
-  @@unique([company_id, order_number], map: "uq_customer_order_company_number")
-  @@index([customer_id], map: "idx_customer_order_customer")
+  @@index([customer_id, order_date], map: "idx_customer_order_customer_date")
 }
 
 model customer_order_item {
-  customer_order_item_id BigInt         @id @default(autoincrement())
+  customer_order_item_id BigInt               @id @default(autoincrement())
   customer_order_id      BigInt
-  item_id                BigInt
-  quantity               Decimal        @db.Decimal(14, 3)
-  unit_price             Decimal        @db.Decimal(14, 2)
-  tax_amount             Decimal        @default(0) @db.Decimal(14, 2)
-  total_amount           Decimal        @db.Decimal(14, 2)
-  inventory_item         inventory_item @relation(fields: [item_id], references: [item_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_customer_order_item_item")
-  customer_order         customer_order @relation(fields: [customer_order_id], references: [customer_order_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_customer_order_item_order")
+  inventory_item_id      BigInt
+  description            String?
+  hsn_sac_code           String?              @db.VarChar(20)
+  uom                    String               @db.VarChar(20)
+  ordered_quantity       Decimal              @db.Decimal(18, 3)
+  unit_rate              Decimal              @default(0) @db.Decimal(18, 4)
+  gst_rate               Decimal              @default(0) @db.Decimal(6, 3)
+  line_amount            Decimal              @default(0) @db.Decimal(16, 2)
+  customer_order         customer_order       @relation(fields: [customer_order_id], references: [customer_order_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_customer_order_item_order")
+  inventory_item         inventory_item       @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  sales_invoice_item     sales_invoice_item[]
 }
 
 model delivery {
-  delivery_id       BigInt         @id @default(autoincrement())
-  customer_order_id BigInt
-  warehouse_id      BigInt?
-  delivery_number   String         @unique
-  delivery_date     DateTime       @default(dbgenerated("CURRENT_DATE")) @db.Date
-  status            String         @default("PENDING")
-  remarks           String?
-  customer_order    customer_order @relation(fields: [customer_order_id], references: [customer_order_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_delivery_order")
-  warehouse         warehouse?     @relation(fields: [warehouse_id], references: [warehouse_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_delivery_warehouse")
+  delivery_id        BigInt               @id @default(autoincrement())
+  delivery_number    String               @unique
+  customer_id        BigInt
+  customer_order_id  BigInt?
+  sales_invoice_id   BigInt?
+  warehouse_id       BigInt?
+  delivery_date      DateTime             @default(dbgenerated("CURRENT_DATE")) @db.Date
+  challan_number     String?
+  transporter        String?
+  vehicle_number     String?
+  lr_number          String?
+  destination        String?
+  status             String               @default("DRAFT")
+  remarks            String?
+  customer           customer             @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction)
+  customer_order     customer_order?      @relation(fields: [customer_order_id], references: [customer_order_id], onUpdate: NoAction, map: "fk_delivery_order")
+  sales_invoice      sales_invoice?       @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onUpdate: NoAction)
+  warehouse          warehouse?           @relation(fields: [warehouse_id], references: [warehouse_id], onUpdate: NoAction, map: "fk_delivery_warehouse")
+  weighbridge_ticket weighbridge_ticket[]
+
+  @@index([customer_id, delivery_date], map: "idx_delivery_customer_date")
 }
 
 model department {
-  department_id   BigInt     @id @default(autoincrement())
-  company_id      BigInt
-  department_name String
-  description     String?
-  company         company    @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_department_company")
-  employee        employee[]
+  department_id        BigInt                 @id @default(autoincrement())
+  company_id           BigInt
+  department_code      String
+  department_name      String
+  company              company                @relation(fields: [company_id], references: [company_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_department_company")
+  employee             employee[]
+  purchase_requisition purchase_requisition[]
+
+  @@unique([company_id, department_code])
+  @@unique([company_id, department_name])
 }
 
 model document {
   document_id    BigInt   @id @default(autoincrement())
-  uploaded_by    BigInt?
-  document_type  String?
+  document_type  String
   reference_type String?
   reference_id   BigInt?
   file_name      String
-  file_path      String
+  file_url       String?
   mime_type      String?
+  uploaded_by    BigInt?
   uploaded_at    DateTime @default(now()) @db.Timestamptz(6)
-  users          users?   @relation(fields: [uploaded_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_document_uploaded_by")
+  metadata       Json     @default("{}")
+  users          users?   @relation(fields: [uploaded_by], references: [user_id], onUpdate: NoAction, map: "fk_document_uploaded_by")
+
+  @@index([reference_type, reference_id], map: "idx_document_reference")
 }
 
 model employee {
-  employee_id             BigInt       @id @default(autoincrement())
+  employee_id             BigInt                    @id @default(autoincrement())
   company_id              BigInt
   factory_id              BigInt?
   department_id           BigInt?
   employee_code           String
   first_name              String
+  middle_name             String?
   last_name               String?
-  email                   String?
-  phone                   String?
   designation             String?
-  joining_date            DateTime?    @db.Date
-  employment_status       String       @default("ACTIVE")
-  basic_salary            Decimal?     @db.Decimal(14, 2)
-  pf_amount               Decimal?     @db.Decimal(14, 2)
-  pt_amount               Decimal?     @db.Decimal(14, 2)
-  scheduled_working_hours Decimal?     @db.Decimal(8, 2)
-  created_at              DateTime     @default(now()) @db.Timestamptz(6)
+  joining_date            DateTime?                 @db.Date
+  leaving_date            DateTime?                 @db.Date
+  employment_status       String                    @default("ACTIVE")
+  pan                     String?                   @db.VarChar(10)
+  pf_number               String?
+  pt_number               String?
+  bank_name               String?
+  bank_account_number     String?
+  bank_ifsc               String?
+  scheduled_daily_hours   Decimal                   @default(8) @db.Decimal(5, 2)
+  created_at              DateTime                  @default(now()) @db.Timestamptz(6)
+  updated_at              DateTime                  @default(now()) @db.Timestamptz(6)
   attendance              attendance[]
-  company                 company      @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_employee_company")
-  department              department?  @relation(fields: [department_id], references: [department_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_employee_department")
-  factory                 factory?     @relation(fields: [factory_id], references: [factory_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_employee_factory")
+  company                 company                   @relation(fields: [company_id], references: [company_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_employee_company")
+  department              department?               @relation(fields: [department_id], references: [department_id], onUpdate: NoAction, map: "fk_employee_department")
+  factory                 factory?                  @relation(fields: [factory_id], references: [factory_id], onUpdate: NoAction, map: "fk_employee_factory")
+  employee_salary_history employee_salary_history[]
   leave                   leave[]
   payroll                 payroll[]
   users                   users?
-  work_order              work_order[]
 
-  @@unique([company_id, employee_code], map: "uq_employee_company_code")
+  @@unique([company_id, employee_code])
   @@index([department_id], map: "idx_employee_department")
   @@index([factory_id], map: "idx_employee_factory")
 }
 
 model expense {
-  expense_id          BigInt           @id @default(autoincrement())
-  company_id          BigInt
-  factory_id          BigInt?
-  expense_category_id BigInt
+  expense_id          BigInt             @id @default(autoincrement())
+  expense_number      String             @unique
   vendor_id           BigInt?
-  submitted_by        BigInt?
-  expense_date        DateTime         @default(dbgenerated("CURRENT_DATE")) @db.Date
-  description         String?
-  amount              Decimal          @db.Decimal(14, 2)
-  status              String           @default("PENDING")
-  expense_category    expense_category @relation(fields: [expense_category_id], references: [expense_category_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_expense_category")
-  company             company          @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_expense_company")
-  factory             factory?         @relation(fields: [factory_id], references: [factory_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_expense_factory")
-  users               users?           @relation(fields: [submitted_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_expense_submitted_by")
-  vendor              vendor?          @relation(fields: [vendor_id], references: [vendor_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_expense_vendor")
+  expense_category_id BigInt
+  expense_date        DateTime           @default(dbgenerated("CURRENT_DATE")) @db.Date
+  bill_number         String?
+  bill_date           DateTime?          @db.Date
+  payment_terms       String?
+  taxable_amount      Decimal            @default(0) @db.Decimal(16, 2)
+  cgst_amount         Decimal            @default(0) @db.Decimal(16, 2)
+  sgst_amount         Decimal            @default(0) @db.Decimal(16, 2)
+  igst_amount         Decimal            @default(0) @db.Decimal(16, 2)
+  total_amount        Decimal            @default(0) @db.Decimal(16, 2)
+  status              String             @default("DRAFT")
+  remarks             String?
+  accounts_payable    accounts_payable[]
+  expense_category    expense_category   @relation(fields: [expense_category_id], references: [expense_category_id], onUpdate: NoAction, map: "fk_expense_category")
+  vendor              vendor?            @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_expense_vendor")
+  expense_item        expense_item[]
 
-  @@index([expense_category_id], map: "idx_expense_category")
+  @@index([expense_category_id, expense_date], map: "idx_expense_category_date")
+  @@index([expense_date], map: "idx_expense_date")
 }
 
 model expense_category {
   expense_category_id    BigInt             @id @default(autoincrement())
   category_name          String             @unique
   parent_category_id     BigInt?
+  category_group         String             @default("OTHER_EXPENSE")
   description            String?
   expense                expense[]
-  expense_category       expense_category?  @relation("expense_categoryToexpense_category", fields: [parent_category_id], references: [expense_category_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_expense_category_parent")
+  expense_category       expense_category?  @relation("expense_categoryToexpense_category", fields: [parent_category_id], references: [expense_category_id], onUpdate: NoAction, map: "fk_expense_category_parent")
   other_expense_category expense_category[] @relation("expense_categoryToexpense_category")
 }
 
 model factory {
-  factory_id           BigInt                 @id @default(autoincrement())
-  company_id           BigInt
-  factory_name         String
-  address              String?
-  city                 String?
-  state                String?
-  country              String?
-  created_at           DateTime               @default(now()) @db.Timestamptz(6)
-  customer_order       customer_order[]
-  employee             employee[]
-  expense              expense[]
-  company              company                @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_factory_company")
-  machine              machine[]
-  production_order     production_order[]
-  purchase_order       purchase_order[]
-  purchase_requisition purchase_requisition[]
-  warehouse            warehouse[]
+  factory_id       BigInt             @id @default(autoincrement())
+  company_id       BigInt
+  factory_code     String
+  factory_name     String
+  gstin            String?            @db.VarChar(15)
+  address_line1    String?
+  address_line2    String?
+  city             String?
+  state            String?
+  state_code       String?            @db.VarChar(5)
+  pincode          String?            @db.VarChar(10)
+  phone            String?
+  is_active        Boolean            @default(true)
+  created_at       DateTime           @default(now()) @db.Timestamptz(6)
+  employee         employee[]
+  company          company            @relation(fields: [company_id], references: [company_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_factory_company")
+  job_work_order   job_work_order[]
+  machine          machine[]
+  production_order production_order[]
+  warehouse        warehouse[]
+
+  @@unique([company_id, factory_code])
 }
 
 model grn {
-  grn_id            BigInt          @id @default(autoincrement())
-  purchase_order_id BigInt?
-  warehouse_id      BigInt
-  received_by       BigInt?
-  grn_number        String          @unique
-  received_date     DateTime        @default(dbgenerated("CURRENT_DATE")) @db.Date
-  status            String          @default("RECEIVED")
-  remarks           String?
-  purchase_order    purchase_order? @relation(fields: [purchase_order_id], references: [purchase_order_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_grn_po")
-  users             users?          @relation(fields: [received_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_grn_received_by")
-  warehouse         warehouse       @relation(fields: [warehouse_id], references: [warehouse_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_grn_warehouse")
-  grn_item          grn_item[]
+  grn_id                  BigInt               @id @default(autoincrement())
+  grn_number              String               @unique
+  purchase_order_id       BigInt?
+  vendor_id               BigInt
+  warehouse_id            BigInt
+  vendor_invoice_id       BigInt?
+  grn_date                DateTime             @default(dbgenerated("CURRENT_DATE")) @db.Date
+  gate_entry_number       String?
+  supplier_invoice_number String?
+  challan_number          String?
+  transporter             String?
+  vehicle_number          String?
+  lr_number               String?
+  inspection_status       String               @default("PENDING")
+  inspected_by            BigInt?
+  inspection_date         DateTime?            @db.Date
+  remarks                 String?
+  users                   users?               @relation(fields: [inspected_by], references: [user_id], onUpdate: NoAction)
+  purchase_order          purchase_order?      @relation(fields: [purchase_order_id], references: [purchase_order_id], onUpdate: NoAction, map: "fk_grn_po")
+  vendor                  vendor               @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction)
+  vendor_invoice          vendor_invoice?      @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onUpdate: NoAction)
+  warehouse               warehouse            @relation(fields: [warehouse_id], references: [warehouse_id], onUpdate: NoAction, map: "fk_grn_warehouse")
+  grn_item                grn_item[]
+  weighbridge_ticket      weighbridge_ticket[]
 
-  @@index([purchase_order_id], map: "idx_grn_po")
+  @@index([vendor_id, grn_date], map: "idx_grn_vendor_date")
 }
 
 model grn_item {
-  grn_item_id       BigInt         @id @default(autoincrement())
-  grn_id            BigInt
-  item_id           BigInt
-  ordered_quantity  Decimal?       @db.Decimal(14, 3)
-  received_quantity Decimal        @db.Decimal(14, 3)
-  accepted_quantity Decimal?       @db.Decimal(14, 3)
-  rejected_quantity Decimal        @default(0) @db.Decimal(14, 3)
-  grn               grn            @relation(fields: [grn_id], references: [grn_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_grn_item_grn")
-  inventory_item    inventory_item @relation(fields: [item_id], references: [item_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_grn_item_item")
+  grn_item_id            BigInt               @id @default(autoincrement())
+  grn_id                 BigInt
+  purchase_order_item_id BigInt?
+  inventory_item_id      BigInt
+  lot_id                 BigInt?
+  heat_number            String?
+  uom                    String               @db.VarChar(20)
+  challan_quantity       Decimal              @default(0) @db.Decimal(18, 3)
+  received_quantity      Decimal              @default(0) @db.Decimal(18, 3)
+  accepted_quantity      Decimal              @default(0) @db.Decimal(18, 3)
+  rejected_quantity      Decimal              @default(0) @db.Decimal(18, 3)
+  rejection_reason       String?
+  rate                   Decimal              @default(0) @db.Decimal(18, 4)
+  grn                    grn                  @relation(fields: [grn_id], references: [grn_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_grn_item_grn")
+  inventory_item         inventory_item       @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  inventory_lot          inventory_lot?       @relation(fields: [lot_id], references: [lot_id], onUpdate: NoAction)
+  purchase_order_item    purchase_order_item? @relation(fields: [purchase_order_item_id], references: [purchase_order_item_id], onUpdate: NoAction)
+
+  @@index([heat_number], map: "idx_grn_item_heat")
 }
 
 model inventory_item {
-  item_id                BigInt                   @id @default(autoincrement())
-  company_id             BigInt
+  inventory_item_id      BigInt                   @id @default(autoincrement())
   item_category_id       BigInt?
-  item_code              String
+  item_code              String                   @unique
   item_name              String
   description            String?
-  unit_of_measure        String
-  item_type              String
-  standard_cost          Decimal?                 @db.Decimal(14, 2)
-  reorder_level          Decimal?                 @default(0) @db.Decimal(14, 3)
+  item_type              String                   @default("OTHER")
+  hsn_sac_code           String?                  @db.VarChar(20)
+  base_uom               String                   @db.VarChar(20)
+  gst_rate               Decimal                  @default(0) @db.Decimal(6, 3)
+  is_stock_item          Boolean                  @default(true)
+  is_lot_tracked         Boolean                  @default(false)
   is_active              Boolean                  @default(true)
-  created_at             DateTime                 @default(now()) @db.Timestamptz(6)
   bill_of_material       bill_of_material[]
   bom_item               bom_item[]
   customer_order_item    customer_order_item[]
+  expense_item           expense_item[]
   grn_item               grn_item[]
-  item_category          item_category?           @relation(fields: [item_category_id], references: [item_category_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_inventory_item_category")
-  company                company                  @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_inventory_item_company")
+  item_category          item_category?           @relation(fields: [item_category_id], references: [item_category_id], onUpdate: NoAction, map: "fk_inventory_item_category")
+  inventory_lot          inventory_lot[]
   inventory_stock        inventory_stock[]
+  job_work_challan_item  job_work_challan_item[]
+  job_work_receipt_item  job_work_receipt_item[]
   production_consumption production_consumption[]
   production_order       production_order[]
   production_output      production_output[]
   purchase_order_item    purchase_order_item[]
+  sales_invoice_item     sales_invoice_item[]
   stock_movement         stock_movement[]
+  vendor_invoice_item    vendor_invoice_item[]
 
-  @@unique([company_id, item_code], map: "uq_inventory_item_company_code")
+  @@index([item_category_id], map: "idx_inventory_item_category")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model inventory_stock {
   inventory_stock_id BigInt         @id @default(autoincrement())
-  item_id            BigInt
+  inventory_item_id  BigInt
   warehouse_id       BigInt
-  quantity           Decimal        @default(0) @db.Decimal(14, 3)
-  reserved_quantity  Decimal        @default(0) @db.Decimal(14, 3)
-  updated_at         DateTime       @default(now()) @db.Timestamptz(6)
-  inventory_item     inventory_item @relation(fields: [item_id], references: [item_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_inventory_stock_item")
-  warehouse          warehouse      @relation(fields: [warehouse_id], references: [warehouse_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_inventory_stock_warehouse")
+  lot_id             BigInt?
+  quantity           Decimal        @default(0) @db.Decimal(18, 3)
+  reserved_quantity  Decimal        @default(0) @db.Decimal(18, 3)
+  last_updated_at    DateTime       @default(now()) @db.Timestamptz(6)
+  inventory_item     inventory_item @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  inventory_lot      inventory_lot? @relation(fields: [lot_id], references: [lot_id], onDelete: Restrict, onUpdate: NoAction)
+  warehouse          warehouse      @relation(fields: [warehouse_id], references: [warehouse_id], onUpdate: NoAction, map: "fk_inventory_stock_warehouse")
 
-  @@unique([item_id, warehouse_id], map: "uq_inventory_stock_item_warehouse")
-  @@index([item_id], map: "idx_inventory_stock_item")
-  @@index([warehouse_id], map: "idx_inventory_stock_warehouse")
+  @@index([inventory_item_id, warehouse_id], map: "idx_inventory_stock_item_warehouse")
 }
 
 model item_category {
-  item_category_id BigInt           @id @default(autoincrement())
-  category_name    String           @unique
-  description      String?
-  inventory_item   inventory_item[]
+  item_category_id    BigInt           @id @default(autoincrement())
+  category_name       String           @unique
+  parent_category_id  BigInt?
+  description         String?
+  inventory_item      inventory_item[]
+  item_category       item_category?   @relation("item_categoryToitem_category", fields: [parent_category_id], references: [item_category_id], onUpdate: NoAction)
+  other_item_category item_category[]  @relation("item_categoryToitem_category")
 }
 
 model journal_entry {
-  journal_entry_id BigInt         @id @default(autoincrement())
-  company_id       BigInt
-  entry_number     String
-  entry_date       DateTime       @default(dbgenerated("CURRENT_DATE")) @db.Date
-  description      String?
-  status           String         @default("DRAFT")
-  created_by       BigInt?
-  company          company        @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_journal_entry_company")
-  users            users?         @relation(fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_journal_entry_user")
-  journal_line     journal_line[]
+  journal_entry_id    BigInt            @id @default(autoincrement())
+  accounting_entry_id BigInt?
+  journal_number      String            @unique
+  entry_date          DateTime          @default(dbgenerated("CURRENT_DATE")) @db.Date
+  description         String?
+  status              String            @default("POSTED")
+  created_by          BigInt?
+  created_at          DateTime          @default(now()) @db.Timestamptz(6)
+  accounting_entry    accounting_entry? @relation(fields: [accounting_entry_id], references: [accounting_entry_id], onUpdate: NoAction)
+  users               users?            @relation(fields: [created_by], references: [user_id], onUpdate: NoAction, map: "fk_journal_entry_user")
+  journal_line        journal_line[]
 
-  @@unique([company_id, entry_number], map: "uq_journal_entry_company_number")
   @@index([entry_date], map: "idx_journal_entry_date")
 }
 
@@ -501,10 +587,10 @@ model journal_line {
   journal_line_id  BigInt           @id @default(autoincrement())
   journal_entry_id BigInt
   account_id       BigInt
-  debit_amount     Decimal          @default(0) @db.Decimal(14, 2)
-  credit_amount    Decimal          @default(0) @db.Decimal(14, 2)
+  debit_amount     Decimal          @default(0) @db.Decimal(16, 2)
+  credit_amount    Decimal          @default(0) @db.Decimal(16, 2)
   description      String?
-  chart_of_account chart_of_account @relation(fields: [account_id], references: [account_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_journal_line_account")
+  chart_of_account chart_of_account @relation(fields: [account_id], references: [account_id], onUpdate: NoAction, map: "fk_journal_line_account")
   journal_entry    journal_entry    @relation(fields: [journal_entry_id], references: [journal_entry_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_journal_line_entry")
 }
 
@@ -514,12 +600,12 @@ model leave {
   leave_type  String
   start_date  DateTime @db.Date
   end_date    DateTime @db.Date
+  days        Decimal  @db.Decimal(6, 2)
   reason      String?
   status      String   @default("PENDING")
   approved_by BigInt?
-  created_at  DateTime @default(now()) @db.Timestamptz(6)
-  users       users?   @relation(fields: [approved_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_leave_approved_by")
-  employee    employee @relation(fields: [employee_id], references: [employee_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_leave_employee")
+  users       users?   @relation(fields: [approved_by], references: [user_id], onUpdate: NoAction, map: "fk_leave_approved_by")
+  employee    employee @relation(fields: [employee_id], references: [employee_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_leave_employee")
 }
 
 model machine {
@@ -529,55 +615,60 @@ model machine {
   machine_name String
   machine_type String?
   status       String       @default("ACTIVE")
-  factory      factory      @relation(fields: [factory_id], references: [factory_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_machine_factory")
+  factory      factory      @relation(fields: [factory_id], references: [factory_id], onUpdate: NoAction, map: "fk_machine_factory")
   work_order   work_order[]
 
-  @@unique([factory_id, machine_code], map: "uq_machine_factory_code")
+  @@unique([factory_id, machine_code])
 }
 
 model payment {
-  payment_id        BigInt          @id @default(autoincrement())
-  company_id        BigInt
+  payment_id        BigInt             @id @default(autoincrement())
   vendor_id         BigInt?
   customer_id       BigInt?
   vendor_invoice_id BigInt?
   sales_invoice_id  BigInt?
   bank_account_id   BigInt?
-  payment_date      DateTime        @default(dbgenerated("CURRENT_DATE")) @db.Date
+  payment_date      DateTime           @default(dbgenerated("CURRENT_DATE")) @db.Date
   payment_type      String
-  amount            Decimal         @db.Decimal(14, 2)
+  mode              String             @default("BANK")
   reference_number  String?
+  amount            Decimal            @db.Decimal(16, 2)
   remarks           String?
-  bank_account      bank_account?   @relation(fields: [bank_account_id], references: [bank_account_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_bank")
-  company           company         @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_company")
-  customer          customer?       @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_customer")
-  sales_invoice     sales_invoice?  @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_sales_invoice")
-  vendor            vendor?         @relation(fields: [vendor_id], references: [vendor_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_vendor")
-  vendor_invoice    vendor_invoice? @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payment_vendor_invoice")
+  bank_transaction  bank_transaction[]
+  bank_account      bank_account?      @relation(fields: [bank_account_id], references: [bank_account_id], onUpdate: NoAction, map: "fk_payment_bank")
+  customer          customer?          @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction, map: "fk_payment_customer")
+  sales_invoice     sales_invoice?     @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onUpdate: NoAction, map: "fk_payment_sales_invoice")
+  vendor            vendor?            @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_payment_vendor")
+  vendor_invoice    vendor_invoice?    @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onUpdate: NoAction, map: "fk_payment_vendor_invoice")
 
   @@index([payment_date], map: "idx_payment_date")
 }
 
 model payroll {
-  payroll_id       BigInt   @id @default(autoincrement())
-  employee_id      BigInt
-  payroll_month    DateTime @db.Date
-  basic_salary     Decimal  @db.Decimal(14, 2)
-  pf_amount        Decimal  @default(0) @db.Decimal(14, 2)
-  pt_amount        Decimal  @default(0) @db.Decimal(14, 2)
-  overtime_amount  Decimal  @default(0) @db.Decimal(14, 2)
-  deduction_amount Decimal  @default(0) @db.Decimal(14, 2)
-  net_salary       Decimal  @db.Decimal(14, 2)
-  status           String   @default("PENDING")
-  created_at       DateTime @default(now()) @db.Timestamptz(6)
-  employee         employee @relation(fields: [employee_id], references: [employee_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payroll_employee")
+  payroll_id              BigInt                   @id @default(autoincrement())
+  employee_id             BigInt
+  payroll_month           DateTime                 @db.Date
+  salary_history_id       BigInt?
+  basic_salary            Decimal                  @default(0) @db.Decimal(14, 2)
+  overtime_amount         Decimal                  @default(0) @db.Decimal(14, 2)
+  allowances              Decimal                  @default(0) @db.Decimal(14, 2)
+  gross_salary            Decimal                  @default(0) @db.Decimal(14, 2)
+  pf_deduction            Decimal                  @default(0) @db.Decimal(14, 2)
+  pt_deduction            Decimal                  @default(0) @db.Decimal(14, 2)
+  other_deductions        Decimal                  @default(0) @db.Decimal(14, 2)
+  net_salary              Decimal                  @default(0) @db.Decimal(14, 2)
+  status                  String                   @default("DRAFT")
+  paid_at                 DateTime?                @db.Timestamptz(6)
+  employee                employee                 @relation(fields: [employee_id], references: [employee_id], onUpdate: NoAction, map: "fk_payroll_employee")
+  employee_salary_history employee_salary_history? @relation(fields: [salary_history_id], references: [salary_history_id], onUpdate: NoAction)
 
-  @@unique([employee_id, payroll_month], map: "uq_payroll_employee_month")
+  @@unique([employee_id, payroll_month])
 }
 
 model permission {
   permission_id   BigInt            @id @default(autoincrement())
-  permission_name String            @unique
+  permission_code String            @unique
+  permission_name String
   description     String?
   role_permission role_permission[]
 }
@@ -585,103 +676,109 @@ model permission {
 model production_consumption {
   production_consumption_id BigInt           @id @default(autoincrement())
   production_order_id       BigInt
-  item_id                   BigInt
+  work_order_id             BigInt?
+  inventory_item_id         BigInt
+  lot_id                    BigInt?
   warehouse_id              BigInt
-  quantity_consumed         Decimal          @db.Decimal(14, 3)
-  consumption_date          DateTime         @default(now()) @db.Timestamptz(6)
-  inventory_item            inventory_item   @relation(fields: [item_id], references: [item_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_production_consumption_item")
-  production_order          production_order @relation(fields: [production_order_id], references: [production_order_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_production_consumption_order")
-  warehouse                 warehouse        @relation(fields: [warehouse_id], references: [warehouse_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_production_consumption_warehouse")
-
-  @@index([production_order_id], map: "idx_production_consumption_order")
+  quantity                  Decimal          @db.Decimal(18, 3)
+  consumed_at               DateTime         @default(now()) @db.Timestamptz(6)
+  remarks                   String?
+  inventory_item            inventory_item   @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  inventory_lot             inventory_lot?   @relation(fields: [lot_id], references: [lot_id], onUpdate: NoAction)
+  production_order          production_order @relation(fields: [production_order_id], references: [production_order_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_production_consumption_order")
+  warehouse                 warehouse        @relation(fields: [warehouse_id], references: [warehouse_id], onUpdate: NoAction, map: "fk_production_consumption_warehouse")
+  work_order                work_order?      @relation(fields: [work_order_id], references: [work_order_id], onUpdate: NoAction)
 }
 
 model production_order {
-  production_order_id    BigInt                   @id @default(autoincrement())
-  company_id             BigInt
-  factory_id             BigInt
-  product_item_id        BigInt
-  order_number           String
-  planned_quantity       Decimal                  @db.Decimal(14, 3)
-  planned_start_date     DateTime?                @db.Date
-  planned_end_date       DateTime?                @db.Date
-  status                 String                   @default("PLANNED")
-  production_consumption production_consumption[]
-  company                company                  @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_production_order_company")
-  factory                factory                  @relation(fields: [factory_id], references: [factory_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_production_order_factory")
-  inventory_item         inventory_item           @relation(fields: [product_item_id], references: [item_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_production_order_product")
-  production_output      production_output[]
-  work_order             work_order[]
-
-  @@unique([company_id, order_number], map: "uq_production_order_company_number")
-  @@index([factory_id], map: "idx_production_order_factory")
+  production_order_id     BigInt                   @id @default(autoincrement())
+  production_order_number String                   @unique
+  inventory_item_id       BigInt
+  factory_id              BigInt
+  planned_quantity        Decimal                  @db.Decimal(18, 3)
+  planned_start_date      DateTime?                @db.Date
+  planned_end_date        DateTime?                @db.Date
+  status                  String                   @default("PLANNED")
+  remarks                 String?
+  production_consumption  production_consumption[]
+  factory                 factory                  @relation(fields: [factory_id], references: [factory_id], onUpdate: NoAction, map: "fk_production_order_factory")
+  inventory_item          inventory_item           @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  production_output       production_output[]
+  work_order              work_order[]
 }
 
 model production_output {
   production_output_id BigInt           @id @default(autoincrement())
   production_order_id  BigInt
-  item_id              BigInt
+  work_order_id        BigInt?
+  inventory_item_id    BigInt
+  lot_id               BigInt?
   warehouse_id         BigInt
-  quantity_produced    Decimal          @db.Decimal(14, 3)
-  output_date          DateTime         @default(now()) @db.Timestamptz(6)
-  inventory_item       inventory_item   @relation(fields: [item_id], references: [item_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_production_output_item")
-  production_order     production_order @relation(fields: [production_order_id], references: [production_order_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_production_output_order")
-  warehouse            warehouse        @relation(fields: [warehouse_id], references: [warehouse_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_production_output_warehouse")
-
-  @@index([production_order_id], map: "idx_production_output_order")
+  quantity             Decimal          @db.Decimal(18, 3)
+  rejected_quantity    Decimal          @default(0) @db.Decimal(18, 3)
+  produced_at          DateTime         @default(now()) @db.Timestamptz(6)
+  remarks              String?
+  inventory_item       inventory_item   @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  inventory_lot        inventory_lot?   @relation(fields: [lot_id], references: [lot_id], onUpdate: NoAction)
+  production_order     production_order @relation(fields: [production_order_id], references: [production_order_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_production_output_order")
+  warehouse            warehouse        @relation(fields: [warehouse_id], references: [warehouse_id], onUpdate: NoAction, map: "fk_production_output_warehouse")
+  work_order           work_order?      @relation(fields: [work_order_id], references: [work_order_id], onUpdate: NoAction)
 }
 
 model purchase_order {
-  purchase_order_id      BigInt                @id @default(autoincrement())
-  company_id             BigInt
-  factory_id             BigInt?
-  vendor_id              BigInt
-  created_by             BigInt?
-  order_number           String
-  order_date             DateTime              @default(dbgenerated("CURRENT_DATE")) @db.Date
-  expected_delivery_date DateTime?             @db.Date
-  status                 String                @default("DRAFT")
-  subtotal               Decimal               @default(0) @db.Decimal(14, 2)
-  tax_amount             Decimal               @default(0) @db.Decimal(14, 2)
-  total_amount           Decimal               @default(0) @db.Decimal(14, 2)
-  remarks                String?
-  grn                    grn[]
-  company                company               @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_purchase_order_company")
-  users                  users?                @relation(fields: [created_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_purchase_order_created_by")
-  factory                factory?              @relation(fields: [factory_id], references: [factory_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_purchase_order_factory")
-  vendor                 vendor                @relation(fields: [vendor_id], references: [vendor_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_purchase_order_vendor")
-  purchase_order_item    purchase_order_item[]
-  vendor_invoice         vendor_invoice[]
+  purchase_order_id       BigInt                @id @default(autoincrement())
+  po_number               String                @unique
+  vendor_id               BigInt
+  purchase_requisition_id BigInt?
+  order_date              DateTime              @default(dbgenerated("CURRENT_DATE")) @db.Date
+  expected_date           DateTime?             @db.Date
+  payment_terms           String?
+  currency                String                @default("INR") @db.VarChar(3)
+  taxable_amount          Decimal               @default(0) @db.Decimal(16, 2)
+  tax_amount              Decimal               @default(0) @db.Decimal(16, 2)
+  total_amount            Decimal               @default(0) @db.Decimal(16, 2)
+  status                  String                @default("DRAFT")
+  notes                   String?
+  grn                     grn[]
+  purchase_requisition    purchase_requisition? @relation(fields: [purchase_requisition_id], references: [purchase_requisition_id], onUpdate: NoAction)
+  vendor                  vendor                @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_purchase_order_vendor")
+  purchase_order_item     purchase_order_item[]
+  vendor_invoice          vendor_invoice[]
 
-  @@unique([company_id, order_number], map: "uq_purchase_order_company_number")
-  @@index([order_date], map: "idx_purchase_order_date")
-  @@index([vendor_id], map: "idx_purchase_order_vendor")
+  @@index([vendor_id, order_date], map: "idx_purchase_order_vendor_date")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model purchase_order_item {
-  purchase_order_item_id BigInt         @id @default(autoincrement())
+  purchase_order_item_id BigInt                @id @default(autoincrement())
   purchase_order_id      BigInt
-  item_id                BigInt
-  quantity               Decimal        @db.Decimal(14, 3)
-  unit_price             Decimal        @db.Decimal(14, 2)
-  tax_amount             Decimal        @default(0) @db.Decimal(14, 2)
-  total_amount           Decimal        @db.Decimal(14, 2)
-  inventory_item         inventory_item @relation(fields: [item_id], references: [item_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_po_item_item")
-  purchase_order         purchase_order @relation(fields: [purchase_order_id], references: [purchase_order_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_po_item_po")
+  inventory_item_id      BigInt
+  description            String?
+  hsn_sac_code           String?               @db.VarChar(20)
+  uom                    String                @db.VarChar(20)
+  ordered_quantity       Decimal               @db.Decimal(18, 3)
+  unit_rate              Decimal               @default(0) @db.Decimal(18, 4)
+  discount_amount        Decimal               @default(0) @db.Decimal(16, 2)
+  gst_rate               Decimal               @default(0) @db.Decimal(6, 3)
+  line_amount            Decimal               @default(0) @db.Decimal(16, 2)
+  grn_item               grn_item[]
+  inventory_item         inventory_item        @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  purchase_order         purchase_order        @relation(fields: [purchase_order_id], references: [purchase_order_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_po_item_po")
+  vendor_invoice_item    vendor_invoice_item[]
 }
 
 model purchase_requisition {
-  purchase_requisition_id BigInt   @id @default(autoincrement())
-  company_id              BigInt
-  factory_id              BigInt?
+  purchase_requisition_id BigInt           @id @default(autoincrement())
+  requisition_number      String           @unique
+  department_id           BigInt?
   requested_by            BigInt?
-  requisition_date        DateTime @default(dbgenerated("CURRENT_DATE")) @db.Date
-  status                  String   @default("PENDING")
+  requisition_date        DateTime         @default(dbgenerated("CURRENT_DATE")) @db.Date
+  required_date           DateTime?        @db.Date
+  status                  String           @default("DRAFT")
   remarks                 String?
-  company                 company  @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_purchase_req_company")
-  factory                 factory? @relation(fields: [factory_id], references: [factory_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_purchase_req_factory")
-  users                   users?   @relation(fields: [requested_by], references: [user_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_purchase_req_user")
+  purchase_order          purchase_order[]
+  department              department?      @relation(fields: [department_id], references: [department_id], onUpdate: NoAction)
+  users                   users?           @relation(fields: [requested_by], references: [user_id], onUpdate: NoAction, map: "fk_purchase_req_user")
 }
 
 model role {
@@ -690,6 +787,7 @@ model role {
   description     String?
   approval_step   approval_step[]
   role_permission role_permission[]
+  users           users[]
 }
 
 model role_permission {
@@ -702,140 +800,461 @@ model role_permission {
 }
 
 model sales_invoice {
-  sales_invoice_id    BigInt                @id @default(autoincrement())
-  customer_id         BigInt
-  customer_order_id   BigInt?
-  invoice_number      String                @unique
-  invoice_date        DateTime              @default(dbgenerated("CURRENT_DATE")) @db.Date
-  due_date            DateTime?             @db.Date
-  subtotal            Decimal               @default(0) @db.Decimal(14, 2)
-  tax_amount          Decimal               @default(0) @db.Decimal(14, 2)
-  total_amount        Decimal               @db.Decimal(14, 2)
-  status              String                @default("PENDING")
-  accounts_receivable accounts_receivable[]
-  payment             payment[]
-  customer            customer              @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_sales_invoice_customer")
-  customer_order      customer_order?       @relation(fields: [customer_order_id], references: [customer_order_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_sales_invoice_order")
+  sales_invoice_id      BigInt               @id @default(autoincrement())
+  invoice_number        String               @unique
+  invoice_type          String               @default("TAX_INVOICE")
+  customer_id           BigInt
+  customer_order_id     BigInt?
+  invoice_date          DateTime             @default(dbgenerated("CURRENT_DATE")) @db.Date
+  buyer_order_number    String?
+  buyer_order_date      DateTime?            @db.Date
+  payment_terms         String?
+  due_date              DateTime?            @db.Date
+  supplier_reference    String?
+  bill_to_name          String?
+  bill_to_address       String?
+  bill_to_gstin         String?              @db.VarChar(15)
+  ship_to_name          String?
+  ship_to_address       String?
+  ship_to_gstin         String?              @db.VarChar(15)
+  consignee_name        String?
+  consignee_address     String?
+  consignee_gstin       String?              @db.VarChar(15)
+  place_of_supply       String?
+  transporter           String?
+  vehicle_number        String?
+  lr_number             String?
+  eway_bill_number      String?
+  eway_bill_date        DateTime?            @db.Timestamptz(6)
+  eway_bill_valid_until DateTime?            @db.Timestamptz(6)
+  irn                   String?
+  ack_number            String?
+  ack_date              DateTime?            @db.Timestamptz(6)
+  taxable_amount        Decimal              @default(0) @db.Decimal(16, 2)
+  cgst_amount           Decimal              @default(0) @db.Decimal(16, 2)
+  sgst_amount           Decimal              @default(0) @db.Decimal(16, 2)
+  igst_amount           Decimal              @default(0) @db.Decimal(16, 2)
+  cess_amount           Decimal              @default(0) @db.Decimal(16, 2)
+  discount_amount       Decimal              @default(0) @db.Decimal(16, 2)
+  other_charges         Decimal              @default(0) @db.Decimal(16, 2)
+  round_off             Decimal              @default(0) @db.Decimal(16, 2)
+  total_amount          Decimal              @default(0) @db.Decimal(16, 2)
+  status                String               @default("DRAFT")
+  notes                 String?
+  accounts_receivable   accounts_receivable?
+  delivery              delivery[]
+  payment               payment[]
+  customer              customer             @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction, map: "fk_sales_invoice_customer")
+  customer_order        customer_order?      @relation(fields: [customer_order_id], references: [customer_order_id], onUpdate: NoAction, map: "fk_sales_invoice_order")
+  sales_invoice_item    sales_invoice_item[]
 
-  @@index([customer_id], map: "idx_sales_invoice_customer")
+  @@index([customer_id, invoice_date], map: "idx_sales_invoice_customer_date")
+  @@index([eway_bill_number], map: "idx_sales_invoice_eway")
+  @@index([irn], map: "idx_sales_invoice_irn")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model stock_movement {
   stock_movement_id BigInt         @id @default(autoincrement())
-  item_id           BigInt
+  inventory_item_id BigInt
   warehouse_id      BigInt
+  lot_id            BigInt?
   movement_type     String
-  quantity          Decimal        @db.Decimal(14, 3)
+  quantity          Decimal        @db.Decimal(18, 3)
   reference_type    String?
   reference_id      BigInt?
   movement_date     DateTime       @default(now()) @db.Timestamptz(6)
   remarks           String?
-  inventory_item    inventory_item @relation(fields: [item_id], references: [item_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_stock_movement_item")
-  warehouse         warehouse      @relation(fields: [warehouse_id], references: [warehouse_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_stock_movement_warehouse")
+  inventory_item    inventory_item @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  inventory_lot     inventory_lot? @relation(fields: [lot_id], references: [lot_id], onDelete: Restrict, onUpdate: NoAction)
+  warehouse         warehouse      @relation(fields: [warehouse_id], references: [warehouse_id], onUpdate: NoAction, map: "fk_stock_movement_warehouse")
 
-  @@index([item_id, movement_date], map: "idx_stock_movement_item_date")
+  @@index([inventory_item_id, movement_date], map: "idx_stock_movement_item_date")
 }
 
 model users {
   user_id              BigInt                 @id @default(autoincrement())
   employee_id          BigInt?                @unique
+  role_id              BigInt?
   username             String                 @unique
   password_hash        String
   is_active            Boolean                @default(true)
   last_login_at        DateTime?              @db.Timestamptz(6)
   created_at           DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime               @default(now()) @db.Timestamptz(6)
   accounting_entry     accounting_entry[]
   approval_action      approval_action[]
   audit_log            audit_log[]
   document             document[]
-  expense              expense[]
   grn                  grn[]
+  job_work_receipt     job_work_receipt[]
   journal_entry        journal_entry[]
   leave                leave[]
-  purchase_order       purchase_order[]
   purchase_requisition purchase_requisition[]
-  employee             employee?              @relation(fields: [employee_id], references: [employee_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_users_employee")
+  employee             employee?              @relation(fields: [employee_id], references: [employee_id], onUpdate: NoAction, map: "fk_users_employee")
+  role                 role?                  @relation(fields: [role_id], references: [role_id], onUpdate: NoAction)
 }
 
 model vendor {
-  vendor_id        BigInt             @id @default(autoincrement())
-  company_id       BigInt
-  vendor_code      String
-  vendor_name      String
-  contact_person   String?
-  phone            String?
-  email            String?
-  address          String?
-  city             String?
-  state            String?
-  tax_id           String?
-  created_at       DateTime           @default(now()) @db.Timestamptz(6)
-  accounts_payable accounts_payable[]
-  expense          expense[]
-  payment          payment[]
-  purchase_order   purchase_order[]
-  company          company            @relation(fields: [company_id], references: [company_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_vendor_company")
-  vendor_invoice   vendor_invoice[]
-  vendor_ledger    vendor_ledger[]
+  vendor_id          BigInt             @id @default(autoincrement())
+  company_id         BigInt
+  vendor_code        String
+  vendor_name        String
+  gstin              String?            @db.VarChar(15)
+  pan                String?            @db.VarChar(10)
+  email              String?
+  phone              String?
+  billing_address    String?
+  shipping_address   String?
+  city               String?
+  state              String?
+  state_code         String?            @db.VarChar(5)
+  pincode            String?            @db.VarChar(10)
+  payment_terms_days Int                @default(0)
+  is_job_worker      Boolean            @default(false)
+  is_active          Boolean            @default(true)
+  accounts_payable   accounts_payable[]
+  expense            expense[]
+  grn                grn[]
+  inventory_lot      inventory_lot[]
+  job_work_challan   job_work_challan[]
+  job_work_order     job_work_order[]
+  payment            payment[]
+  purchase_order     purchase_order[]
+  company            company            @relation(fields: [company_id], references: [company_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_vendor_company")
+  vendor_invoice     vendor_invoice[]
+  vendor_ledger      vendor_ledger[]
 
-  @@unique([company_id, vendor_code], map: "uq_vendor_company_code")
+  @@unique([company_id, vendor_code])
+  @@index([gstin], map: "idx_vendor_gstin")
 }
 
 model vendor_invoice {
-  vendor_invoice_id BigInt             @id @default(autoincrement())
-  vendor_id         BigInt
-  purchase_order_id BigInt?
-  invoice_number    String
-  invoice_date      DateTime           @db.Date
-  due_date          DateTime?          @db.Date
-  subtotal          Decimal            @default(0) @db.Decimal(14, 2)
-  tax_amount        Decimal            @default(0) @db.Decimal(14, 2)
-  total_amount      Decimal            @db.Decimal(14, 2)
-  status            String             @default("PENDING")
-  accounts_payable  accounts_payable[]
-  payment           payment[]
-  purchase_order    purchase_order?    @relation(fields: [purchase_order_id], references: [purchase_order_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_vendor_invoice_po")
-  vendor            vendor             @relation(fields: [vendor_id], references: [vendor_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_vendor_invoice_vendor")
+  vendor_invoice_id   BigInt                @id @default(autoincrement())
+  vendor_id           BigInt
+  purchase_order_id   BigInt?
+  invoice_number      String
+  invoice_date        DateTime              @db.Date
+  due_date            DateTime?             @db.Date
+  payment_terms       String?
+  place_of_supply     String?
+  supplier_gstin      String?               @db.VarChar(15)
+  recipient_gstin     String?               @db.VarChar(15)
+  supplier_reference  String?
+  taxable_amount      Decimal               @default(0) @db.Decimal(16, 2)
+  cgst_amount         Decimal               @default(0) @db.Decimal(16, 2)
+  sgst_amount         Decimal               @default(0) @db.Decimal(16, 2)
+  igst_amount         Decimal               @default(0) @db.Decimal(16, 2)
+  cess_amount         Decimal               @default(0) @db.Decimal(16, 2)
+  discount_amount     Decimal               @default(0) @db.Decimal(16, 2)
+  other_charges       Decimal               @default(0) @db.Decimal(16, 2)
+  round_off           Decimal               @default(0) @db.Decimal(16, 2)
+  total_amount        Decimal               @default(0) @db.Decimal(16, 2)
+  status              String                @default("BOOKED")
+  accounts_payable    accounts_payable?
+  grn                 grn[]
+  payment             payment[]
+  purchase_order      purchase_order?       @relation(fields: [purchase_order_id], references: [purchase_order_id], onUpdate: NoAction, map: "fk_vendor_invoice_po")
+  vendor              vendor                @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_vendor_invoice_vendor")
+  vendor_invoice_item vendor_invoice_item[]
+
+  @@unique([vendor_id, invoice_number])
+  @@index([invoice_date], map: "idx_vendor_invoice_date")
 }
 
 model vendor_ledger {
   vendor_ledger_id BigInt   @id @default(autoincrement())
   vendor_id        BigInt
-  transaction_date DateTime @default(now()) @db.Timestamptz(6)
-  transaction_type String
+  transaction_date DateTime @db.Date
+  reference_type   String
   reference_id     BigInt?
-  debit_amount     Decimal  @default(0) @db.Decimal(14, 2)
-  credit_amount    Decimal  @default(0) @db.Decimal(14, 2)
+  debit_amount     Decimal  @default(0) @db.Decimal(16, 2)
+  credit_amount    Decimal  @default(0) @db.Decimal(16, 2)
   description      String?
-  vendor           vendor   @relation(fields: [vendor_id], references: [vendor_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_vendor_ledger_vendor")
+  vendor           vendor   @relation(fields: [vendor_id], references: [vendor_id], onDelete: Cascade, onUpdate: NoAction, map: "fk_vendor_ledger_vendor")
 }
 
 model warehouse {
   warehouse_id           BigInt                   @id @default(autoincrement())
   factory_id             BigInt
+  warehouse_code         String
   warehouse_name         String
   location               String?
-  warehouse_type         String?
+  is_active              Boolean                  @default(true)
   delivery               delivery[]
   grn                    grn[]
+  inventory_lot          inventory_lot[]
   inventory_stock        inventory_stock[]
   production_consumption production_consumption[]
   production_output      production_output[]
   stock_movement         stock_movement[]
-  factory                factory                  @relation(fields: [factory_id], references: [factory_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_warehouse_factory")
+  factory                factory                  @relation(fields: [factory_id], references: [factory_id], onUpdate: NoAction, map: "fk_warehouse_factory")
+
+  @@unique([factory_id, warehouse_code])
 }
 
 model work_order {
-  work_order_id        BigInt           @id @default(autoincrement())
-  production_order_id  BigInt
-  machine_id           BigInt?
-  assigned_employee_id BigInt?
-  work_order_number    String           @unique
-  planned_hours        Decimal?         @db.Decimal(8, 2)
-  actual_hours         Decimal?         @db.Decimal(8, 2)
-  status               String           @default("PENDING")
-  employee             employee?        @relation(fields: [assigned_employee_id], references: [employee_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_work_order_employee")
-  machine              machine?         @relation(fields: [machine_id], references: [machine_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_work_order_machine")
-  production_order     production_order @relation(fields: [production_order_id], references: [production_order_id], onDelete: NoAction, onUpdate: NoAction, map: "fk_work_order_production")
+  work_order_id          BigInt                   @id @default(autoincrement())
+  production_order_id    BigInt?
+  machine_id             BigInt?
+  work_order_number      String                   @unique
+  operation_name         String
+  planned_quantity       Decimal?                 @db.Decimal(18, 3)
+  actual_quantity        Decimal                  @default(0) @db.Decimal(18, 3)
+  start_time             DateTime?                @db.Timestamptz(6)
+  end_time               DateTime?                @db.Timestamptz(6)
+  status                 String                   @default("PENDING")
+  remarks                String?
+  production_consumption production_consumption[]
+  production_output      production_output[]
+  machine                machine?                 @relation(fields: [machine_id], references: [machine_id], onUpdate: NoAction, map: "fk_work_order_machine")
+  production_order       production_order?        @relation(fields: [production_order_id], references: [production_order_id], onUpdate: NoAction, map: "fk_work_order_production")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model employee_salary_history {
+  salary_history_id BigInt    @id @default(autoincrement())
+  employee_id       BigInt
+  effective_from    DateTime  @db.Date
+  effective_to      DateTime? @db.Date
+  basic_salary      Decimal   @default(0) @db.Decimal(14, 2)
+  hra               Decimal   @default(0) @db.Decimal(14, 2)
+  allowances        Decimal   @default(0) @db.Decimal(14, 2)
+  overtime_rate     Decimal   @default(0) @db.Decimal(14, 2)
+  pf_rate           Decimal   @default(0) @db.Decimal(6, 3)
+  pt_amount         Decimal   @default(0) @db.Decimal(14, 2)
+  deductions        Decimal   @default(0) @db.Decimal(14, 2)
+  gross_salary      Decimal   @default(0) @db.Decimal(14, 2)
+  net_salary        Decimal   @default(0) @db.Decimal(14, 2)
+  remarks           String?
+  employee          employee  @relation(fields: [employee_id], references: [employee_id], onDelete: Cascade, onUpdate: NoAction)
+  payroll           payroll[]
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model expense_item {
+  expense_item_id   BigInt          @id @default(autoincrement())
+  expense_id        BigInt
+  inventory_item_id BigInt?
+  description       String
+  uom               String?         @db.VarChar(20)
+  quantity          Decimal         @default(1) @db.Decimal(18, 3)
+  trip_number       String?
+  measurement       Decimal?        @db.Decimal(18, 3)
+  measurement_uom   String?         @db.VarChar(20)
+  rate              Decimal         @default(0) @db.Decimal(18, 4)
+  taxable_amount    Decimal         @default(0) @db.Decimal(16, 2)
+  tax_amount        Decimal         @default(0) @db.Decimal(16, 2)
+  line_amount       Decimal         @default(0) @db.Decimal(16, 2)
+  expense           expense         @relation(fields: [expense_id], references: [expense_id], onDelete: Cascade, onUpdate: NoAction)
+  inventory_item    inventory_item? @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model inventory_lot {
+  lot_id                 BigInt                   @id @default(autoincrement())
+  inventory_item_id      BigInt
+  warehouse_id           BigInt
+  lot_number             String
+  heat_number            String?
+  supplier_id            BigInt?
+  received_date          DateTime?                @db.Date
+  quantity_received      Decimal                  @default(0) @db.Decimal(18, 3)
+  accepted_quantity      Decimal                  @default(0) @db.Decimal(18, 3)
+  rejected_quantity      Decimal                  @default(0) @db.Decimal(18, 3)
+  status                 String                   @default("OPEN")
+  remarks                String?
+  grn_item               grn_item[]
+  inventory_item         inventory_item           @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  vendor                 vendor?                  @relation(fields: [supplier_id], references: [vendor_id], onUpdate: NoAction)
+  warehouse              warehouse                @relation(fields: [warehouse_id], references: [warehouse_id], onUpdate: NoAction)
+  inventory_stock        inventory_stock[]
+  job_work_challan_item  job_work_challan_item[]
+  job_work_receipt_item  job_work_receipt_item[]
+  production_consumption production_consumption[]
+  production_output      production_output[]
+  stock_movement         stock_movement[]
+
+  @@unique([warehouse_id, lot_number])
+  @@index([heat_number], map: "idx_inventory_lot_heat")
+  @@index([inventory_item_id], map: "idx_inventory_lot_item")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model job_work_challan {
+  job_work_challan_id   BigInt                  @id @default(autoincrement())
+  challan_number        String                  @unique
+  job_work_order_id     BigInt
+  job_worker_vendor_id  BigInt
+  challan_date          DateTime                @default(dbgenerated("CURRENT_DATE")) @db.Date
+  party_challan_number  String?
+  vehicle_number        String?
+  transporter           String?
+  lr_number             String?
+  purpose               String                  @default("JOBWORK")
+  eway_bill_number      String?
+  eway_bill_date        DateTime?               @db.Timestamptz(6)
+  eway_bill_valid_until DateTime?               @db.Timestamptz(6)
+  irn                   String?
+  ack_number            String?
+  ack_date              DateTime?               @db.Timestamptz(6)
+  status                String                  @default("DRAFT")
+  remarks               String?
+  job_work_order        job_work_order          @relation(fields: [job_work_order_id], references: [job_work_order_id], onUpdate: NoAction)
+  vendor                vendor                  @relation(fields: [job_worker_vendor_id], references: [vendor_id], onUpdate: NoAction)
+  job_work_challan_item job_work_challan_item[]
+  job_work_receipt      job_work_receipt[]
+  weighbridge_ticket    weighbridge_ticket[]
+
+  @@index([challan_date], map: "idx_job_work_challan_date")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model job_work_challan_item {
+  job_work_challan_item_id BigInt           @id @default(autoincrement())
+  job_work_challan_id      BigInt
+  inventory_item_id        BigInt
+  lot_id                   BigInt?
+  description              String?
+  hsn_sac_code             String?          @db.VarChar(20)
+  uom                      String           @db.VarChar(20)
+  quantity                 Decimal          @db.Decimal(18, 3)
+  weight_kg                Decimal?         @db.Decimal(18, 3)
+  rate                     Decimal?         @db.Decimal(18, 4)
+  remarks                  String?
+  inventory_item           inventory_item   @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  job_work_challan         job_work_challan @relation(fields: [job_work_challan_id], references: [job_work_challan_id], onDelete: Cascade, onUpdate: NoAction)
+  inventory_lot            inventory_lot?   @relation(fields: [lot_id], references: [lot_id], onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model job_work_order {
+  job_work_order_id     BigInt             @id @default(autoincrement())
+  job_work_order_number String             @unique
+  job_worker_vendor_id  BigInt
+  customer_order_id     BigInt?
+  factory_id            BigInt
+  order_date            DateTime           @default(dbgenerated("CURRENT_DATE")) @db.Date
+  process_name          String
+  party_po_number       String?
+  planned_quantity      Decimal?           @db.Decimal(18, 3)
+  status                String             @default("OPEN")
+  remarks               String?
+  job_work_challan      job_work_challan[]
+  customer_order        customer_order?    @relation(fields: [customer_order_id], references: [customer_order_id], onUpdate: NoAction)
+  factory               factory            @relation(fields: [factory_id], references: [factory_id], onUpdate: NoAction)
+  vendor                vendor             @relation(fields: [job_worker_vendor_id], references: [vendor_id], onUpdate: NoAction)
+  job_work_receipt      job_work_receipt[]
+
+  @@index([job_worker_vendor_id], map: "idx_job_work_order_worker")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model job_work_receipt {
+  job_work_receipt_id   BigInt                  @id @default(autoincrement())
+  receipt_number        String                  @unique
+  job_work_order_id     BigInt
+  job_work_challan_id   BigInt?
+  receipt_date          DateTime                @default(dbgenerated("CURRENT_DATE")) @db.Date
+  vehicle_number        String?
+  transporter           String?
+  gate_entry_number     String?
+  inspection_status     String                  @default("PENDING")
+  inspected_by          BigInt?
+  status                String                  @default("RECEIVED")
+  remarks               String?
+  users                 users?                  @relation(fields: [inspected_by], references: [user_id], onUpdate: NoAction)
+  job_work_challan      job_work_challan?       @relation(fields: [job_work_challan_id], references: [job_work_challan_id], onUpdate: NoAction)
+  job_work_order        job_work_order          @relation(fields: [job_work_order_id], references: [job_work_order_id], onUpdate: NoAction)
+  job_work_receipt_item job_work_receipt_item[]
+
+  @@index([receipt_date], map: "idx_job_work_receipt_date")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model job_work_receipt_item {
+  job_work_receipt_item_id BigInt           @id @default(autoincrement())
+  job_work_receipt_id      BigInt
+  inventory_item_id        BigInt
+  lot_id                   BigInt?
+  description              String?
+  uom                      String           @db.VarChar(20)
+  challan_quantity         Decimal          @default(0) @db.Decimal(18, 3)
+  received_quantity        Decimal          @default(0) @db.Decimal(18, 3)
+  accepted_quantity        Decimal          @default(0) @db.Decimal(18, 3)
+  rejected_quantity        Decimal          @default(0) @db.Decimal(18, 3)
+  rejection_reason         String?
+  heat_number              String?
+  inventory_item           inventory_item   @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
+  job_work_receipt         job_work_receipt @relation(fields: [job_work_receipt_id], references: [job_work_receipt_id], onDelete: Cascade, onUpdate: NoAction)
+  inventory_lot            inventory_lot?   @relation(fields: [lot_id], references: [lot_id], onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model sales_invoice_item {
+  sales_invoice_item_id  BigInt               @id @default(autoincrement())
+  sales_invoice_id       BigInt
+  customer_order_item_id BigInt?
+  inventory_item_id      BigInt?
+  description            String
+  hsn_sac_code           String?              @db.VarChar(20)
+  uom                    String               @db.VarChar(20)
+  quantity               Decimal              @default(0) @db.Decimal(18, 3)
+  unit_price             Decimal              @default(0) @db.Decimal(18, 4)
+  discount_amount        Decimal              @default(0) @db.Decimal(16, 2)
+  taxable_amount         Decimal              @default(0) @db.Decimal(16, 2)
+  gst_rate               Decimal              @default(0) @db.Decimal(6, 3)
+  cgst_amount            Decimal              @default(0) @db.Decimal(16, 2)
+  sgst_amount            Decimal              @default(0) @db.Decimal(16, 2)
+  igst_amount            Decimal              @default(0) @db.Decimal(16, 2)
+  cess_amount            Decimal              @default(0) @db.Decimal(16, 2)
+  line_total             Decimal              @default(0) @db.Decimal(16, 2)
+  customer_order_item    customer_order_item? @relation(fields: [customer_order_item_id], references: [customer_order_item_id], onUpdate: NoAction)
+  inventory_item         inventory_item?      @relation(fields: [inventory_item_id], references: [inventory_item_id], onDelete: Restrict, onUpdate: NoAction)
+  sales_invoice          sales_invoice        @relation(fields: [sales_invoice_id], references: [sales_invoice_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model vendor_invoice_item {
+  vendor_invoice_item_id BigInt               @id @default(autoincrement())
+  vendor_invoice_id      BigInt
+  purchase_order_item_id BigInt?
+  inventory_item_id      BigInt?
+  description            String
+  hsn_sac_code           String?              @db.VarChar(20)
+  uom                    String               @db.VarChar(20)
+  quantity               Decimal              @default(0) @db.Decimal(18, 3)
+  unit_price             Decimal              @default(0) @db.Decimal(18, 4)
+  discount_amount        Decimal              @default(0) @db.Decimal(16, 2)
+  taxable_amount         Decimal              @default(0) @db.Decimal(16, 2)
+  gst_rate               Decimal              @default(0) @db.Decimal(6, 3)
+  cgst_amount            Decimal              @default(0) @db.Decimal(16, 2)
+  sgst_amount            Decimal              @default(0) @db.Decimal(16, 2)
+  igst_amount            Decimal              @default(0) @db.Decimal(16, 2)
+  line_total             Decimal              @default(0) @db.Decimal(16, 2)
+  inventory_item         inventory_item?      @relation(fields: [inventory_item_id], references: [inventory_item_id], onDelete: Restrict, onUpdate: NoAction)
+  purchase_order_item    purchase_order_item? @relation(fields: [purchase_order_item_id], references: [purchase_order_item_id], onUpdate: NoAction)
+  vendor_invoice         vendor_invoice       @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model weighbridge_ticket {
+  weighbridge_ticket_id BigInt            @id @default(autoincrement())
+  ticket_number         String            @unique
+  ticket_date           DateTime          @default(now()) @db.Timestamptz(6)
+  vehicle_number        String
+  transporter           String?
+  gross_weight_kg       Decimal           @db.Decimal(18, 3)
+  tare_weight_kg        Decimal           @db.Decimal(18, 3)
+  net_weight_kg         Decimal?          @default(dbgenerated("(gross_weight_kg - tare_weight_kg)")) @db.Decimal(18, 3)
+  grn_id                BigInt?
+  delivery_id           BigInt?
+  job_work_challan_id   BigInt?
+  operator_name         String?
+  remarks               String?
+  delivery              delivery?         @relation(fields: [delivery_id], references: [delivery_id], onUpdate: NoAction)
+  grn                   grn?              @relation(fields: [grn_id], references: [grn_id], onUpdate: NoAction)
+  job_work_challan      job_work_challan? @relation(fields: [job_work_challan_id], references: [job_work_challan_id], onUpdate: NoAction)
+
+  @@index([vehicle_number, ticket_date], map: "idx_weighbridge_vehicle_date")
 }
