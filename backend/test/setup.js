@@ -22,7 +22,9 @@ async function setupIntegration() {
   const warehouse = await prisma.warehouse.create({ data: { factory_id: factory.factory_id, warehouse_code: `W-${suffix}`, warehouse_name: `Test Warehouse ${suffix}` } });
   const customer = await prisma.customer.create({ data: { company_id: company.company_id, customer_code: `C-${suffix}`, customer_name: `Test Customer ${suffix}` } });
   const vendor = await prisma.vendor.create({ data: { company_id: company.company_id, vendor_code: `V-${suffix}`, vendor_name: `Test Vendor ${suffix}` } });
+  const otherVendor = await prisma.vendor.create({ data: { company_id: company.company_id, vendor_code: `V2-${suffix}`, vendor_name: `Other Test Vendor ${suffix}` } });
   const inventoryItem = await prisma.inventory_item.create({ data: { item_code: `I-${suffix}`, item_name: `Test Item ${suffix}`, base_uom: 'EA' } });
+  const lotInventoryItem = await prisma.inventory_item.create({ data: { item_code: `L-${suffix}`, item_name: `Lot Test Item ${suffix}`, base_uom: 'EA', is_lot_tracked: true } });
   const workflow = await prisma.approval_workflow.create({ data: { workflow_name: `Test Workflow ${suffix}`, transaction_type: 'TEST' } });
   const user = await prisma.users.create({ data: { username: `test-user-${suffix}`, password_hash: 'not-a-real-password', role_id: role.role_id } });
 
@@ -39,8 +41,10 @@ async function setupIntegration() {
     auth: `Bearer ${createAuthToken(user.user_id)}`,
     customerId: customer.customer_id.toString(),
     vendorId: vendor.vendor_id.toString(),
+    otherVendorId: otherVendor.vendor_id.toString(),
     warehouseId: warehouse.warehouse_id.toString(),
     inventoryItemId: inventoryItem.inventory_item_id.toString(),
+    lotInventoryItemId: lotInventoryItem.inventory_item_id.toString(),
     workflowId: workflow.approval_workflow_id.toString(),
     userId: user.user_id.toString(),
     created,
@@ -51,9 +55,9 @@ async function setupIntegration() {
         prisma.approval_request.deleteMany({ where: { approval_workflow_id: workflow.approval_workflow_id } }),
         prisma.sales_invoice.deleteMany({ where: { sales_invoice_id: { in: created.invoiceIds } } }),
         prisma.customer_order.deleteMany({ where: { customer_order_id: { in: created.orderIds } } }),
-        prisma.stock_movement.deleteMany({ where: { inventory_item_id: inventoryItem.inventory_item_id, warehouse_id: warehouse.warehouse_id } }),
-        prisma.inventory_stock.deleteMany({ where: { inventory_item_id: inventoryItem.inventory_item_id, warehouse_id: warehouse.warehouse_id } }),
-        prisma.inventory_lot.deleteMany({ where: { inventory_item_id: inventoryItem.inventory_item_id, warehouse_id: warehouse.warehouse_id } }),
+        prisma.stock_movement.deleteMany({ where: { inventory_item_id: { in: [inventoryItem.inventory_item_id, lotInventoryItem.inventory_item_id] }, warehouse_id: warehouse.warehouse_id } }),
+        prisma.inventory_stock.deleteMany({ where: { inventory_item_id: { in: [inventoryItem.inventory_item_id, lotInventoryItem.inventory_item_id] }, warehouse_id: warehouse.warehouse_id } }),
+        prisma.inventory_lot.deleteMany({ where: { inventory_item_id: { in: [inventoryItem.inventory_item_id, lotInventoryItem.inventory_item_id] }, warehouse_id: warehouse.warehouse_id } }),
         prisma.grn.deleteMany({ where: { grn_id: { in: created.grnIds } } }),
         prisma.purchase_order.deleteMany({ where: { purchase_order_id: { in: created.purchaseOrderIds } } }),
         prisma.purchase_requisition.deleteMany({ where: { purchase_requisition_id: { in: created.requisitionIds } } }),
@@ -61,9 +65,11 @@ async function setupIntegration() {
         prisma.users.delete({ where: { user_id: user.user_id } }),
         prisma.role.delete({ where: { role_id: role.role_id } }),
         prisma.inventory_item.delete({ where: { inventory_item_id: inventoryItem.inventory_item_id } }),
+        prisma.inventory_item.delete({ where: { inventory_item_id: lotInventoryItem.inventory_item_id } }),
         prisma.warehouse.delete({ where: { warehouse_id: warehouse.warehouse_id } }),
         prisma.customer.delete({ where: { customer_id: customer.customer_id } }),
         prisma.vendor.delete({ where: { vendor_id: vendor.vendor_id } }),
+        prisma.vendor.delete({ where: { vendor_id: otherVendor.vendor_id } }),
         prisma.factory.delete({ where: { factory_id: factory.factory_id } }),
         prisma.company.delete({ where: { company_id: company.company_id } })
       ]);

@@ -62,6 +62,8 @@ async function postGrn(req, res) {
   if (!['PASSED', 'PARTIAL', 'FAILED'].includes(inspectionStatus)) throw new ValidationError('inspection_status must be PASSED, PARTIAL, or FAILED');
 
   const result = await prisma.$transaction(async (tx) => {
+    const lockedGrn = await tx.$queryRaw`SELECT "grn_id" FROM "public"."grn" WHERE "grn_id" = ${grnId} FOR UPDATE`;
+    if (lockedGrn.length === 0) throw new NotFoundError('grn');
     const grn = await tx.grn.findUnique({
       where: { grn_id: grnId },
       include: {
@@ -72,6 +74,17 @@ async function postGrn(req, res) {
     });
     if (!grn) throw new NotFoundError('grn');
     if (grn.inspection_status !== 'PENDING') throw new ApiError(409, 'GRN has already been inspected');
+
+    if (grn.purchase_order) {
+      if (grn.vendor_id !== grn.purchase_order.vendor_id) throw new ValidationError('GRN vendor must match the purchase order vendor');
+      for (const line of grn.grn_item) {
+        if (!line.purchase_order_item_id) continue;
+        const purchaseOrderItem = grn.purchase_order.purchase_order_item.find((item) => item.purchase_order_item_id === line.purchase_order_item_id);
+        if (!purchaseOrderItem) throw new ValidationError('GRN line is not linked to a purchase order line');
+        if (line.inventory_item_id !== purchaseOrderItem.inventory_item_id) throw new ValidationError('GRN item must match its purchase order item');
+        if (line.uom !== purchaseOrderItem.uom) throw new ValidationError('GRN item UOM must match its purchase order item UOM');
+      }
+    }
 
     const acceptedQuantities = new Map();
     for (const line of grn.grn_item) {
@@ -91,7 +104,6 @@ async function postGrn(req, res) {
             .reduce((sum, otherLine) => sum + Number(otherLine.accepted_quantity), 0);
         }, 0);
         const purchaseOrderItem = grn.purchase_order.purchase_order_item.find((item) => item.purchase_order_item_id === line.purchase_order_item_id);
-        if (!purchaseOrderItem) throw new ValidationError('GRN line is not linked to a purchase order line');
         const remainingQuantity = Number(purchaseOrderItem.ordered_quantity) - otherAccepted;
         if (acceptedQuantity > remainingQuantity) throw new ValidationError('accepted_quantity cannot exceed the remaining purchase order quantity');
       }
@@ -114,11 +126,11 @@ async function postGrn(req, res) {
           await tx.inventory_lot.update({ where: { lot_id: lotId }, data: { quantity_received: { increment: acceptedQuantity }, accepted_quantity: { increment: acceptedQuantity } } });
         } else {
           const lotNumber = line.heat_number || `GRN-${grn.grn_id}-${line.grn_item_id}`;
-          const lot = await tx.inventory_lot.upsert({
-            where: { warehouse_id_lot_number: { warehouse_id: grn.warehouse_id, lot_number: lotNumber } },
-            update: { quantity_received: { increment: acceptedQuantity }, accepted_quantity: { increment: acceptedQuantity } },
-            create: { inventory_item_id: line.inventory_item_id, warehouse_id: grn.warehouse_id, lot_number: lotNumber, heat_number: line.heat_number, supplier_id: grn.vendor_id, received_date: grn.grn_date, quantity_received: acceptedQuantity, accepted_quantity: acceptedQuantity }
-          });
+          const existingLot = await tx.inventory_lot.findUnique({ where: { warehouse_id_lot_number: { warehouse_id: grn.warehouse_id, lot_number: lotNumber } } });
+          if (existingLot && (existingLot.inventory_item_id !== line.inventory_item_id || existingLot.warehouse_id !== grn.warehouse_id)) throw new ValidationError('GRN lot does not match the item and warehouse');
+          const lot = existingLot
+            ? await tx.inventory_lot.update({ where: { lot_id: existingLot.lot_id }, data: { quantity_received: { increment: acceptedQuantity }, accepted_quantity: { increment: acceptedQuantity } } })
+            : await tx.inventory_lot.create({ data: { inventory_item_id: line.inventory_item_id, warehouse_id: grn.warehouse_id, lot_number: lotNumber, heat_number: line.heat_number, supplier_id: grn.vendor_id, received_date: grn.grn_date, quantity_received: acceptedQuantity, accepted_quantity: acceptedQuantity } });
           lotId = lot.lot_id;
           await tx.grn_item.update({ where: { grn_item_id: line.grn_item_id }, data: { lot_id: lotId } });
         }
