@@ -3,11 +3,16 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 const DEVELOPMENT_PASSWORD_HASH = 'DEV_ONLY_PLACEHOLDER_HASH_PASSWORD_VERIFICATION_NOT_IMPLEMENTED';
 const seedDate = new Date('2026-09-01T00:00:00.000Z');
+const transactionOptions = { maxWait: 30000, timeout: 120000 };
+
+function runTransaction(callback) {
+  return prisma.$transaction(callback, transactionOptions);
+}
 
 async function main() {
   console.log('Seeding development data for backend/prisma/schema.prisma...');
 
-  const foundation = await prisma.$transaction(async (tx) => {
+  const foundation = await runTransaction(async (tx) => {
     const company = await tx.company.findFirst({ where: { company_name: 'HMFL Manufacturing Pvt Ltd' } });
     const savedCompany = company
       ? await tx.company.update({ where: { company_id: company.company_id }, data: { legal_name: 'HMFL Manufacturing Pvt Ltd', city: 'Pune', state: 'Maharashtra', state_code: '27', country: 'India' } })
@@ -37,7 +42,7 @@ async function main() {
     return { company: savedCompany, factory, warehouses, departments };
   });
 
-  const access = await prisma.$transaction(async (tx) => {
+  const access = await runTransaction(async (tx) => {
     const permissionCodes = ['master.write', 'inventory.write', 'procurement.write', 'sales.write', 'documents.write', 'documents.review', 'approvals.create', 'approvals.action'];
     const permissions = {};
     for (const code of permissionCodes) permissions[code] = await tx.permission.upsert({ where: { permission_code: code }, update: { permission_name: code }, create: { permission_code: code, permission_name: code, description: `Development permission: ${code}` } });
@@ -59,7 +64,7 @@ async function main() {
     return { roles, users };
   });
 
-  const master = await prisma.$transaction(async (tx) => {
+  const master = await runTransaction(async (tx) => {
     const categories = {};
     for (const name of ['Raw Material', 'Finished Good', 'Consumable', 'Service']) categories[name] = await tx.item_category.upsert({ where: { category_name: name }, update: { description: `Development ${name.toLowerCase()} category` }, create: { category_name: name, description: `Development ${name.toLowerCase()} category` } });
     const items = {};
@@ -77,7 +82,7 @@ async function main() {
     return { categories, items, vendors: { vendor1, vendor2 }, customers: { customer1, customer2 }, machine, expenseCategory, bank, accounts };
   });
 
-  const inventory = await prisma.$transaction(async (tx) => {
+  const inventory = await runTransaction(async (tx) => {
     const raw = master.items['DEV-RM-STEEL'];
     const warehouseId = foundation.warehouses['DEV-RMS'].warehouse_id;
     const savedLot = await tx.inventory_lot.upsert({ where: { warehouse_id_lot_number: { warehouse_id: warehouseId, lot_number: 'DEV-LOT-001' } }, update: { inventory_item_id: raw.inventory_item_id, heat_number: 'DEV-HEAT-2026-001', supplier_id: master.vendors.vendor1.vendor_id, quantity_received: 1000, accepted_quantity: 1000, status: 'OPEN', remarks: 'Development opening lot' }, create: { inventory_item_id: raw.inventory_item_id, warehouse_id: warehouseId, lot_number: 'DEV-LOT-001', heat_number: 'DEV-HEAT-2026-001', supplier_id: master.vendors.vendor1.vendor_id, received_date: seedDate, quantity_received: 1000, accepted_quantity: 1000, remarks: 'Development opening lot' } });
@@ -94,14 +99,14 @@ async function main() {
     return { lot: savedLot };
   });
 
-  await prisma.$transaction(async (tx) => {
+  await runTransaction(async (tx) => {
     const bom = await tx.bill_of_material.upsert({ where: { bom_code: 'DEV-BOM-SHAFT-001' }, update: { finished_item_id: master.items['DEV-FG-SHAFT'].inventory_item_id, version: '1', is_active: true }, create: { finished_item_id: master.items['DEV-FG-SHAFT'].inventory_item_id, bom_code: 'DEV-BOM-SHAFT-001', version: '1', effective_from: seedDate } });
     await tx.bom_item.upsert({ where: { bom_id_component_item_id: { bom_id: bom.bom_id, component_item_id: master.items['DEV-RM-STEEL'].inventory_item_id } }, update: { quantity_per_unit: 2, uom: 'KG', scrap_percentage: 0 }, create: { bom_id: bom.bom_id, component_item_id: master.items['DEV-RM-STEEL'].inventory_item_id, quantity_per_unit: 2, uom: 'KG' } });
     const order = await tx.production_order.upsert({ where: { production_order_number: 'DEV-PROD-001' }, update: { inventory_item_id: master.items['DEV-FG-SHAFT'].inventory_item_id, bom_id: bom.bom_id, factory_id: foundation.factory.factory_id, planned_quantity: 50, status: 'PLANNED', remarks: 'Development production order' }, create: { production_order_number: 'DEV-PROD-001', inventory_item_id: master.items['DEV-FG-SHAFT'].inventory_item_id, bom_id: bom.bom_id, factory_id: foundation.factory.factory_id, planned_quantity: 50, planned_start_date: seedDate, remarks: 'Development production order' } });
   await tx.work_order.upsert({ where: { work_order_number: 'DEV-WO-001' }, update: { production_order_id: order.production_order_id, machine_id: master.machine.machine_id, operation_name: 'Forging', planned_quantity: 50, status: 'PENDING' }, create: { work_order_number: 'DEV-WO-001', production_order_id: order.production_order_id, machine_id: master.machine.machine_id, operation_name: 'Forging', planned_quantity: 50, remarks: 'Development work order' } });
   });
 
-  await prisma.$transaction(async (tx) => {
+  await runTransaction(async (tx) => {
     const definitions = [['Purchase Requisition', 'PURCHASE_REQUISITION', 'Procurement Manager'], ['Purchase Order', 'PURCHASE_ORDER', 'Procurement Manager'], ['Expense', 'EXPENSE', 'Finance Manager'], ['Sales Invoice', 'SALES_INVOICE', 'Sales Manager']];
     for (const [name, type, roleName] of definitions) {
       const workflow = await tx.approval_workflow.upsert({ where: { workflow_name: `Development ${name} Approval` }, update: { transaction_type: type, is_active: true }, create: { workflow_name: `Development ${name} Approval`, transaction_type: type } });
@@ -109,7 +114,7 @@ async function main() {
     }
   });
 
-  await prisma.$transaction(async (tx) => {
+  await runTransaction(async (tx) => {
     const requisition = await tx.purchase_requisition.upsert({ where: { requisition_number: 'DEV-PR-001' }, update: { department_id: foundation.departments.Procurement.department_id, requested_by: access.users['Procurement Manager'].user_id, status: 'SUBMITTED', remarks: 'Development purchase requisition' }, create: { requisition_number: 'DEV-PR-001', department_id: foundation.departments.Procurement.department_id, requested_by: access.users['Procurement Manager'].user_id, requisition_date: seedDate, required_date: new Date('2026-09-15'), status: 'SUBMITTED', remarks: 'Development purchase requisition' } });
     await tx.purchase_requisition_item.deleteMany({ where: { purchase_requisition_id: requisition.purchase_requisition_id } });
     await tx.purchase_requisition_item.create({ data: { purchase_requisition_id: requisition.purchase_requisition_id, inventory_item_id: master.items['DEV-RM-STEEL'].inventory_item_id, description: 'EN8 round steel bar', uom: 'KG', requested_quantity: 500, required_date: new Date('2026-09-15') } });
@@ -121,7 +126,7 @@ async function main() {
     await tx.grn_item.create({ data: { grn_id: grn.grn_id, purchase_order_item_id: poItem.purchase_order_item_id, inventory_item_id: master.items['DEV-RM-STEEL'].inventory_item_id, lot_id: inventory.lot.lot_id, heat_number: 'DEV-HEAT-2026-001', uom: 'KG', challan_quantity: 500, received_quantity: 500, accepted_quantity: 500, rate: 80 } });
   });
 
-  await prisma.$transaction(async (tx) => {
+  await runTransaction(async (tx) => {
     const order = await tx.customer_order.upsert({ where: { order_number: 'DEV-SO-001' }, update: { customer_id: master.customers.customer1.customer_id, status: 'OPEN', remarks: 'Development customer order' }, create: { order_number: 'DEV-SO-001', customer_id: master.customers.customer1.customer_id, order_date: seedDate, buyer_order_number: 'DEV-CUST-PO-001', status: 'OPEN', remarks: 'Development customer order' } });
     await tx.customer_order_item.deleteMany({ where: { customer_order_id: order.customer_order_id } });
     const orderItem = await tx.customer_order_item.create({ data: { customer_order_id: order.customer_order_id, inventory_item_id: master.items['DEV-FG-SHAFT'].inventory_item_id, description: 'Forged Drive Shaft 48mm', uom: 'PCS', ordered_quantity: 10, unit_rate: 1250, gst_rate: 18, line_amount: 12500 } });
@@ -130,7 +135,7 @@ async function main() {
     await tx.sales_invoice_item.create({ data: { sales_invoice_id: invoice.sales_invoice_id, customer_order_item_id: orderItem.customer_order_item_id, inventory_item_id: master.items['DEV-FG-SHAFT'].inventory_item_id, description: 'Forged Drive Shaft 48mm', uom: 'PCS', quantity: 10, unit_price: 1250, taxable_amount: 12500, gst_rate: 18, cgst_amount: 1125, sgst_amount: 1125, line_total: 14750 } });
   });
 
-  await prisma.$transaction(async (tx) => {
+  await runTransaction(async (tx) => {
     const document = await tx.document.findFirst({ where: { file_name: 'DEV-invoice-001.pdf' } });
     const savedDocument = document ? await tx.document.update({ where: { document_id: document.document_id }, data: { document_type: 'PURCHASE_INVOICE', file_url: 'https://example.invalid/development/DEV-invoice-001.pdf', mime_type: 'application/pdf', uploaded_by: access.users['Finance Manager'].user_id, metadata: { environment: 'development' } } }) : await tx.document.create({ data: { document_type: 'PURCHASE_INVOICE', file_name: 'DEV-invoice-001.pdf', file_url: 'https://example.invalid/development/DEV-invoice-001.pdf', mime_type: 'application/pdf', uploaded_by: access.users['Finance Manager'].user_id, metadata: { environment: 'development' } } });
     await tx.invoice_extraction_review.upsert({ where: { document_id: savedDocument.document_id }, update: { extraction_status: 'PENDING', extraction_engine: 'development-placeholder', extraction_version: 'dev-1', review_notes: 'Pending development review' }, create: { document_id: savedDocument.document_id, extraction_status: 'PENDING', extraction_engine: 'development-placeholder', extraction_version: 'dev-1', review_notes: 'Pending development review' } });
