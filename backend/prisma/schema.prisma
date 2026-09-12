@@ -1289,7 +1289,7 @@ model weighbridge_ticket {
   transporter           String?
   gross_weight_kg       Decimal           @db.Decimal(18, 3)
   tare_weight_kg        Decimal           @db.Decimal(18, 3)
-  net_weight_kg         Decimal?          @default(dbgenerated("(gross_weight_kg - tare_weight_kg)")) @db.Decimal(18, 3)
+  net_weight_kg         Decimal?          @db.Decimal(18, 3)
   grn_id                BigInt?
   delivery_id           BigInt?
   job_work_challan_id   BigInt?
