@@ -21,6 +21,18 @@ Required environment variables:
 
 No migration is created or applied by this setup. Run `npm run prisma:generate` whenever the active schema changes.
 
+## Development seed
+
+With a development-only `DATABASE_URL` configured, run:
+
+```bash
+npm run seed
+```
+
+The seed is idempotent and only creates clearly marked development records. It does not apply migrations. Development users are `dev.admin`, `dev.procurement.manager`, `dev.stores.manager`, `dev.production.manager`, `dev.finance.manager`, and `dev.sales.manager`, matching the Admin, Procurement Manager, Stores Manager, Production Manager, Finance Manager, and Sales Manager roles. Password verification is not implemented; each user contains a non-production placeholder hash.
+
+Seeded records include HMFL Manufacturing Pvt Ltd, Main Factory, two warehouses, six departments, permissions and role mappings, four item categories, four inventory items, two vendors, two customers, one machine, one expense category, one bank account, nine chart-of-account entries, opening raw-material and finished-goods stock, a BOM, production and work orders, four approval workflows, a purchase requisition, purchase order, GRN, customer order, sales invoice, document, and pending invoice extraction review.
+
 ## Authentication and authorization
 
 The temporary development mechanism is an HMAC-signed bearer token: `Bearer <user-id>.<signature>`. Generate one with `createAuthToken` from `middleware/auth.js`. The middleware loads the active user, role, and `role_permission` records from the schema, leaving the route contract ready for JWT verification later.
