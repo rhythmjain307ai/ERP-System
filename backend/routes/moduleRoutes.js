@@ -2,6 +2,7 @@ const express = require('express');
 const asyncHandler = require('../lib/asyncHandler');
 const makeCrud = require('../controllers/crudController');
 const workflow = require('../controllers/erpController');
+const weighbridge = require('../controllers/weighbridgeController');
 const { requireAuth, requirePermission } = require('../middleware/auth');
 
 const configs = {
@@ -38,7 +39,8 @@ function createRoutes() {
   const sales = express.Router(); sales.post('/orders', requireAuth, requirePermission('sales.write'), asyncHandler(workflow.createCustomerOrder)); sales.post('/deliveries', requireAuth, requirePermission('sales.write'), asyncHandler(workflow.createDelivery)); sales.post('/invoices', requireAuth, requirePermission('sales.write'), asyncHandler(workflow.createSalesInvoice));
   const documents = express.Router(); documents.post('/', requireAuth, requirePermission('documents.write'), asyncHandler(workflow.createDocument)); documents.get('/reviews/:id', requireAuth, requirePermission('documents.review'), asyncHandler(workflow.getReview)); documents.patch('/reviews/:id', requireAuth, requirePermission('documents.review'), asyncHandler(workflow.updateReview)); documents.get('/:id', asyncHandler(workflow.getDocument)); documents.patch('/:id', requireAuth, requirePermission('documents.write'), asyncHandler(workflow.updateDocument));
   const approvals = express.Router(); approvals.post('/requests', requireAuth, requirePermission('approvals.create'), asyncHandler(workflow.createApprovalRequest)); approvals.post('/actions', requireAuth, requirePermission('approvals.action'), asyncHandler(workflow.submitApprovalAction));
-  return { master, inventory, procurement, sales, documents, approvals, customers: crudRouter(configs.customers), vendors: crudRouter(configs.vendors) };
+  const weighbridgeTickets = express.Router(); weighbridgeTickets.post('/', requireAuth, requirePermission('master.write'), asyncHandler(weighbridge.create)); weighbridgeTickets.patch('/:id', requireAuth, requirePermission('master.write'), asyncHandler(weighbridge.update));
+  return { master, inventory, procurement, sales, documents, approvals, weighbridgeTickets, customers: crudRouter(configs.customers), vendors: crudRouter(configs.vendors) };
 }
 
 module.exports = { createRoutes, crudRouter };
