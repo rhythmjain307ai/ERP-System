@@ -8,7 +8,7 @@ async function setupIntegration() {
 
   await prisma.$connect();
   const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-  const permissionCodes = ['master.write', 'procurement.write', 'sales.write', 'documents.write', 'documents.review', 'approvals.create', 'approvals.action'];
+  const permissionCodes = ['master.write', 'inventory.write', 'procurement.write', 'sales.write', 'documents.write', 'documents.review', 'approvals.create', 'approvals.action'];
   const role = await prisma.role.create({ data: { role_name: `test-role-${suffix}`, description: 'Integration test role' } });
   const permissions = await Promise.all(permissionCodes.map((permission_code) => prisma.permission.upsert({
     where: { permission_code },
@@ -28,6 +28,8 @@ async function setupIntegration() {
 
   const created = {
     requisitionIds: [],
+    purchaseOrderIds: [],
+    grnIds: [],
     orderIds: [],
     invoiceIds: [],
     approvalTransactionIds: []
@@ -36,6 +38,8 @@ async function setupIntegration() {
   return {
     auth: `Bearer ${createAuthToken(user.user_id)}`,
     customerId: customer.customer_id.toString(),
+    vendorId: vendor.vendor_id.toString(),
+    warehouseId: warehouse.warehouse_id.toString(),
     inventoryItemId: inventoryItem.inventory_item_id.toString(),
     workflowId: workflow.approval_workflow_id.toString(),
     userId: user.user_id.toString(),
@@ -47,6 +51,11 @@ async function setupIntegration() {
         prisma.approval_request.deleteMany({ where: { approval_workflow_id: workflow.approval_workflow_id } }),
         prisma.sales_invoice.deleteMany({ where: { sales_invoice_id: { in: created.invoiceIds } } }),
         prisma.customer_order.deleteMany({ where: { customer_order_id: { in: created.orderIds } } }),
+        prisma.stock_movement.deleteMany({ where: { inventory_item_id: inventoryItem.inventory_item_id, warehouse_id: warehouse.warehouse_id } }),
+        prisma.inventory_stock.deleteMany({ where: { inventory_item_id: inventoryItem.inventory_item_id, warehouse_id: warehouse.warehouse_id } }),
+        prisma.inventory_lot.deleteMany({ where: { inventory_item_id: inventoryItem.inventory_item_id, warehouse_id: warehouse.warehouse_id } }),
+        prisma.grn.deleteMany({ where: { grn_id: { in: created.grnIds } } }),
+        prisma.purchase_order.deleteMany({ where: { purchase_order_id: { in: created.purchaseOrderIds } } }),
         prisma.purchase_requisition.deleteMany({ where: { purchase_requisition_id: { in: created.requisitionIds } } }),
         prisma.approval_workflow.delete({ where: { approval_workflow_id: workflow.approval_workflow_id } }),
         prisma.users.delete({ where: { user_id: user.user_id } }),
