@@ -15,9 +15,17 @@ npm start
 Required environment variables:
 
 - `DATABASE_URL`: PostgreSQL connection string for the active schema.
+- `TEST_DATABASE_URL`: dedicated PostgreSQL connection string used only by integration tests.
 - `PORT`: optional HTTP port, default `4000`.
+- `AUTH_TOKEN_SECRET`: HMAC secret for temporary development bearer tokens; required outside development.
 
 No migration is created or applied by this setup. Run `npm run prisma:generate` whenever the active schema changes.
+
+## Authentication and authorization
+
+The temporary development mechanism is an HMAC-signed bearer token: `Bearer <user-id>.<signature>`. Generate one with `createAuthToken` from `middleware/auth.js`. The middleware loads the active user, role, and `role_permission` records from the schema, leaving the route contract ready for JWT verification later.
+
+Mutating master CRUD endpoints require `master.write`; inventory endpoints use `inventory.write`; procurement endpoints use `procurement.write`; sales endpoints use `sales.write`; document creation/update uses `documents.write`; document review GET/PATCH uses `documents.review`; approval requests use `approvals.create`; approval actions use `approvals.action`. Missing credentials return `401`, while insufficient permissions return `403`. User list, get, create, and update responses never expose `password_hash`.
 
 ## API
 
@@ -72,4 +80,13 @@ Stock deduction, stock balance updates, automatic approval transitions, payment 
 npm test
 ```
 
-Integration route tests run with `RUN_API_TESTS=1` and a test PostgreSQL database in `DATABASE_URL`. They cover transactional line-item creation, approval versioning, invalid line items, and unknown-route handling.
+`npm test` always runs `test/api.test.js` through Node's test runner and does not depend on shell glob behavior. Integration tests use only `TEST_DATABASE_URL`; they seed the minimum company, customer, vendor, inventory item, role, permissions, user, and workflow records, then clean up created records after the run.
+
+Prepare a dedicated test database from the active schema and run all tests with:
+
+```bash
+TEST_DATABASE_URL="postgresql://postgres:password@localhost:5432/erp_backend_test?schema=public" npx prisma db push --skip-generate
+TEST_DATABASE_URL="postgresql://postgres:password@localhost:5432/erp_backend_test?schema=public" npm test
+```
+
+Never set `TEST_DATABASE_URL` to a development or production database. The setup does not create a migration.
