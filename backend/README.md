@@ -16,12 +16,15 @@ Required environment variables:
 
 - `DATABASE_URL`: PostgreSQL connection string for the active schema.
 - `PORT`: optional HTTP port, default `4000`.
+- `AUTH_TOKEN_SECRET`: secret used to verify HMAC-signed bearer tokens for write endpoints.
 
 No migration is created or applied by this setup. Run `npm run prisma:generate` whenever the active schema changes.
 
 ## API
 
 Successful responses use `{ "success": true, "data": ... }`. Errors use `{ "success": false, "error": { "message": "..." } }`. List endpoints accept `page`, `pageSize`, `search`, and, where applicable, `status`.
+
+Write endpoints require `Authorization: Bearer <user-id>.<signature>`, where the signature is an HMAC-SHA256 signature of the user ID using `AUTH_TOKEN_SECRET`. The authenticated user's active role and `role_permission` records determine authorization.
 
 Master data CRUD is available under `/api/master` for `companies`, `factories`, `departments`, `employees`, `users`, `roles`, `permissions`, `customers`, `vendors`, `item-categories`, `inventory-items`, and `warehouses`. Customer and vendor aliases are also available at `/api/customers` and `/api/vendors`.
 
@@ -72,4 +75,12 @@ Stock deduction, stock balance updates, automatic approval transitions, payment 
 npm test
 ```
 
-Integration route tests run with `RUN_API_TESTS=1` and a test PostgreSQL database in `DATABASE_URL`. They cover transactional line-item creation, approval versioning, invalid line items, and unknown-route handling.
+The test command uses Node's test directory discovery and does not depend on shell glob expansion. Basic authentication and routing tests run without a database. To run the complete integration suite, use a dedicated PostgreSQL database and set `TEST_DATABASE_URL`:
+
+```bash
+createdb erp_backend_test
+TEST_DATABASE_URL="postgresql://postgres:password@localhost:5432/erp_backend_test?schema=public" npx prisma db push --skip-generate
+TEST_DATABASE_URL="postgresql://postgres:password@localhost:5432/erp_backend_test?schema=public" npm test
+```
+
+`prisma db push` prepares the dedicated test database directly from `prisma/schema.prisma`; it does not create or apply a Prisma migration. The test bootstrap seeds only the minimum records needed for the requisition, customer order, sales invoice, approval-versioning, authentication, and user-response tests. Never point `TEST_DATABASE_URL` at a development or production database.

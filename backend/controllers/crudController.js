@@ -5,6 +5,12 @@ function toId(value) {
   try { return BigInt(value); } catch { throw new ValidationError('id must be an integer'); }
 }
 
+function withoutPasswordHash(value) {
+  if (!value || typeof value !== 'object') return value;
+  const { password_hash, ...safe } = value;
+  return safe;
+}
+
 function makeCrud({ model, idField, fields, requiredFields = [], searchFields = [], statusField }) {
   const pick = (body) => Object.fromEntries(Object.entries(body).filter(([key]) => fields.includes(key)));
   return {
@@ -18,22 +24,22 @@ function makeCrud({ model, idField, fields, requiredFields = [], searchFields = 
         prisma[model].findMany({ where, skip: (page - 1) * pageSize, take: pageSize, orderBy: { [idField]: 'desc' } }),
         prisma[model].count({ where })
       ]);
-      res.json({ success: true, data, meta: { page, pageSize, total, pageCount: Math.ceil(total / pageSize) } });
+      res.json({ success: true, data: model === 'users' ? data.map(withoutPasswordHash) : data, meta: { page, pageSize, total, pageCount: Math.ceil(total / pageSize) } });
     },
     get: async (req, res) => {
       const data = await prisma[model].findUnique({ where: { [idField]: toId(req.params.id) } });
       if (!data) throw new NotFoundError(model);
-      res.json({ success: true, data });
+      res.json({ success: true, data: model === 'users' ? withoutPasswordHash(data) : data });
     },
     create: async (req, res) => {
       const missing = requiredFields.filter((field) => req.body[field] === undefined || req.body[field] === null);
       if (missing.length) throw new ValidationError('Required fields are missing', { fields: missing });
       const data = await prisma[model].create({ data: pick(req.body) });
-      res.status(201).json({ success: true, data });
+      res.status(201).json({ success: true, data: model === 'users' ? withoutPasswordHash(data) : data });
     },
     update: async (req, res) => {
       const data = await prisma[model].update({ where: { [idField]: toId(req.params.id) }, data: pick(req.body) });
-      res.json({ success: true, data });
+      res.json({ success: true, data: model === 'users' ? withoutPasswordHash(data) : data });
     },
     remove: async (req, res) => {
       await prisma[model].delete({ where: { [idField]: toId(req.params.id) } });
