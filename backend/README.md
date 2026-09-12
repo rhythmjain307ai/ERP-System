@@ -45,13 +45,14 @@ Successful responses use `{ "success": true, "data": ... }`. Errors use `{ "succ
 
 Master data CRUD is available under `/api/master` for `companies`, `factories`, `departments`, `employees`, `users`, `roles`, `permissions`, `customers`, `vendors`, `item-categories`, `inventory-items`, and `warehouses`. Customer and vendor aliases are also available at `/api/customers` and `/api/vendors`.
 
-Inventory CRUD is available under `/api/inventory/items`, `/api/inventory/warehouses`, `/api/inventory/lots`, and `/api/inventory/movements`. Stock deduction and balance posting are intentionally not performed.
+Inventory CRUD is available under `/api/inventory/items`, `/api/inventory/warehouses`, `/api/inventory/lots`, and `/api/inventory/movements`. GRN inventory posting is available through the protected `/api/procurement/grns/:id/post` endpoint and requires `inventory.write`.
 
 Transactional creation endpoints:
 
 - `POST /api/procurement/requisitions`
 - `POST /api/procurement/purchase-orders`
 - `POST /api/procurement/grns`
+- `POST /api/procurement/grns/:id/post` (inspect a pending GRN and post accepted quantities to inventory)
 - `POST /api/sales/orders`
 - `POST /api/sales/deliveries`
 - `POST /api/sales/invoices`
@@ -84,7 +85,7 @@ Purchase orders, GRNs, customer orders, and deliveries use the same `items` shap
 
 ## Deferred workflows
 
-Stock deduction, stock balance updates, automatic approval transitions, payment allocation/posting, and accounting posting are deliberately not implemented. Future payment settlement must use `payment_allocation`; no API in this foundation treats direct invoice references on `payment` as a settlement source.
+GRN posting creates inventory stock and `PURCHASE_RECEIPT` stock movements. Sales deductions, production movements, inventory transfers, job-work movements, accounting posting, payment allocation, and automatic approval transitions remain deferred. Future payment settlement must use `payment_allocation`; no API in this foundation treats direct invoice references on `payment` as a settlement source.
 
 ## Tests
 
