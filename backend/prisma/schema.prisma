@@ -1278,8 +1278,8 @@ model vendor_invoice_item {
   inventory_item           inventory_item?            @relation(fields: [inventory_item_id], references: [inventory_item_id], onDelete: Restrict, onUpdate: NoAction)
   purchase_order_item      purchase_order_item?       @relation(fields: [purchase_order_item_id], references: [purchase_order_item_id], onUpdate: NoAction)
   vendor_invoice           vendor_invoice             @relation(fields: [vendor_invoice_id], references: [vendor_invoice_id], onDelete: Cascade, onUpdate: NoAction)
-}
 
+}
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model weighbridge_ticket {
   weighbridge_ticket_id BigInt            @id @default(autoincrement())
