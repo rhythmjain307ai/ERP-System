@@ -67,13 +67,20 @@ async function createReceiptFixture(orderedQuantity, receivedQuantity, options =
   const purchaseOrderId = BigInt(purchaseOrder.body.data.purchase_order_id);
   const purchaseOrderItemId = purchaseOrder.body.data.purchase_order_item[0].purchase_order_item_id;
   context.created.purchaseOrderIds.push(purchaseOrderId);
-  const grnItem = { purchase_order_item_id: purchaseOrderItemId, inventory_item_id: options.grnInventoryItemId || purchaseOrderItem.inventory_item_id, uom: options.grnUom || purchaseOrderItem.uom, received_quantity: receivedQuantity, lot_id: options.lotId };
+  const grnItem = { purchase_order_item_id: purchaseOrderItemId, inventory_item_id: options.grnInventoryItemId || purchaseOrderItem.inventory_item_id, uom: options.grnUom || purchaseOrderItem.uom, received_quantity: receivedQuantity, lot_id: options.lotId, heat_number: options.heatNumber };
   const grn = await request(app).post('/api/procurement/grns').set('Authorization', context.auth).send({ grn_number: `GRN-${suffix}`, purchase_order_id: purchaseOrderId.toString(), vendor_id: options.grnVendorId || options.purchaseOrderVendorId || context.vendorId, warehouse_id: context.warehouseId, items: [grnItem] });
   assert.equal(grn.status, 201);
   const grnId = BigInt(grn.body.data.grn_id);
   context.created.grnIds.push(grnId);
   return { purchaseOrderId, grnId, grnItemId: BigInt(grn.body.data.grn_item[0].grn_item_id) };
 }
+
+test('persists GRN item heat number', { skip: !integration }, async () => {
+  const heatNumber = `HEAT-${Date.now()}`;
+  const fixture = await createReceiptFixture(5, 5, { heatNumber });
+  const grnItem = await prisma.grn_item.findUnique({ where: { grn_item_id: fixture.grnItemId } });
+  assert.equal(grnItem.heat_number, heatNumber);
+});
 
 test('posts a fully accepted GRN and receives the purchase order', { skip: !integration }, async () => {
   const fixture = await createReceiptFixture(5, 5);
