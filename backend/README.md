@@ -19,7 +19,7 @@ Required environment variables:
 - `PORT`: optional HTTP port, default `4000`.
 - `AUTH_TOKEN_SECRET`: HMAC secret for temporary development bearer tokens; required outside development.
 
-No migration is created or applied by this setup. Run `npm run prisma:generate` whenever the active schema changes.
+The repository contains the `prisma/migrations/0_init` baseline migration, and Prisma recognizes it as the current migration baseline. Run `npm run prisma:generate` whenever the active schema changes.
 
 ## Development seed
 
