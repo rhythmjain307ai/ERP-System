@@ -50,15 +50,28 @@ async function createPurchaseOrder(req, res) {
 
 async function createGrn(req, res) {
   required(req.body, ['grn_number', 'vendor_id', 'warehouse_id']);
+  if (req.body.purchase_order_id !== undefined && (!Array.isArray(req.body.items) || req.body.items.some((item) => item.purchase_order_item_id === undefined || item.purchase_order_item_id === null))) throw new ValidationError('PO-linked GRN items must reference a purchase order item');
   return createWithItems(req, res, 'grn', 'grn_item', 'grn_id', 'grn_item', {
     grn_number: req.body.grn_number, purchase_order_id: req.body.purchase_order_id === undefined ? undefined : id(req.body.purchase_order_id, 'purchase_order_id'), vendor_id: id(req.body.vendor_id, 'vendor_id'), warehouse_id: id(req.body.warehouse_id, 'warehouse_id'), vendor_invoice_id: req.body.vendor_invoice_id === undefined ? undefined : id(req.body.vendor_invoice_id, 'vendor_invoice_id'), grn_date: date(req.body.grn_date), inspection_status: 'PENDING', gate_entry_number: req.body.gate_entry_number, supplier_invoice_number: req.body.supplier_invoice_number, challan_number: req.body.challan_number, remarks: req.body.remarks
-  }, (parent, item) => ({ grn_id: parent.grn_id, purchase_order_item_id: item.purchase_order_item_id === undefined ? undefined : id(item.purchase_order_item_id, 'purchase_order_item_id'), inventory_item_id: id(item.inventory_item_id, 'inventory_item_id'), lot_id: item.lot_id === undefined ? undefined : id(item.lot_id, 'lot_id'), uom: item.uom, challan_quantity: item.challan_quantity === undefined ? undefined : number(item.challan_quantity, 'challan_quantity'), received_quantity: number(item.received_quantity ?? item.quantity, 'received_quantity'), accepted_quantity: item.accepted_quantity === undefined ? undefined : number(item.accepted_quantity, 'accepted_quantity'), rejected_quantity: item.rejected_quantity === undefined ? undefined : number(item.rejected_quantity, 'rejected_quantity'), rejection_reason: item.rejection_reason, rate: item.rate === undefined ? undefined : number(item.rate, 'rate') }));
+  }, (parent, item) => {
+    const receivedQuantity = number(item.received_quantity ?? item.quantity, 'received_quantity');
+    const acceptedQuantity = item.accepted_quantity === undefined ? undefined : number(item.accepted_quantity, 'accepted_quantity');
+    const rejectedQuantity = item.rejected_quantity === undefined ? undefined : number(item.rejected_quantity, 'rejected_quantity');
+    for (const [name, value] of [['received_quantity', receivedQuantity], ['accepted_quantity', acceptedQuantity], ['rejected_quantity', rejectedQuantity]]) {
+      if (value !== undefined && value < 0) throw new ValidationError(`${name} must be greater than or equal to zero`);
+      if (value !== undefined && value > receivedQuantity) throw new ValidationError(`${name} cannot exceed received_quantity`);
+    }
+    if (acceptedQuantity !== undefined && rejectedQuantity !== undefined && acceptedQuantity + rejectedQuantity !== receivedQuantity) throw new ValidationError('accepted_quantity plus rejected_quantity must equal received_quantity');
+    return { grn_id: parent.grn_id, purchase_order_item_id: item.purchase_order_item_id === undefined ? undefined : id(item.purchase_order_item_id, 'purchase_order_item_id'), inventory_item_id: id(item.inventory_item_id, 'inventory_item_id'), lot_id: item.lot_id === undefined ? undefined : id(item.lot_id, 'lot_id'), uom: item.uom, challan_quantity: item.challan_quantity === undefined ? undefined : number(item.challan_quantity, 'challan_quantity'), received_quantity: receivedQuantity, accepted_quantity: acceptedQuantity, rejected_quantity: rejectedQuantity, rejection_reason: item.rejection_reason, rate: item.rate === undefined ? undefined : number(item.rate, 'rate') };
+  });
 }
 
 async function postGrn(req, res) {
   const grnId = id(req.params.id, 'id');
   const inspectionStatus = req.body.inspection_status || req.body.inspection_result;
   const acceptedByLine = new Map((Array.isArray(req.body.items) ? req.body.items : []).map((item) => [String(item.grn_item_id), item.accepted_quantity]));
+  const rejectedByLine = new Map((Array.isArray(req.body.items) ? req.body.items : []).map((item) => [String(item.grn_item_id), item.rejected_quantity]));
+  const rejectionReasonByLine = new Map((Array.isArray(req.body.items) ? req.body.items : []).map((item) => [String(item.grn_item_id), item.rejection_reason]));
   if (!['PASSED', 'PARTIAL', 'FAILED'].includes(inspectionStatus)) throw new ValidationError('inspection_status must be PASSED, PARTIAL, or FAILED');
 
   const result = await prisma.$transaction(async (tx) => {
@@ -78,7 +91,7 @@ async function postGrn(req, res) {
     if (grn.purchase_order) {
       if (grn.vendor_id !== grn.purchase_order.vendor_id) throw new ValidationError('GRN vendor must match the purchase order vendor');
       for (const line of grn.grn_item) {
-        if (!line.purchase_order_item_id) continue;
+        if (!line.purchase_order_item_id) throw new ValidationError('PO-linked GRN items must reference a purchase order item');
         const purchaseOrderItem = grn.purchase_order.purchase_order_item.find((item) => item.purchase_order_item_id === line.purchase_order_item_id);
         if (!purchaseOrderItem) throw new ValidationError('GRN line is not linked to a purchase order line');
         if (line.inventory_item_id !== purchaseOrderItem.inventory_item_id) throw new ValidationError('GRN item must match its purchase order item');
@@ -87,13 +100,22 @@ async function postGrn(req, res) {
     }
 
     const acceptedQuantities = new Map();
+    const rejectedQuantities = new Map();
+    const rejectionReasons = new Map();
     for (const line of grn.grn_item) {
       const suppliedQuantity = acceptedByLine.has(String(line.grn_item_id))
         ? acceptedByLine.get(String(line.grn_item_id))
         : line.accepted_quantity;
       const acceptedQuantity = number(suppliedQuantity, `items[${line.grn_item_id}].accepted_quantity`);
+      const receivedQuantity = number(line.received_quantity, `items[${line.grn_item_id}].received_quantity`);
+      const suppliedRejectedQuantity = rejectedByLine.has(String(line.grn_item_id)) ? rejectedByLine.get(String(line.grn_item_id)) : undefined;
+      const rejectedQuantity = suppliedRejectedQuantity === undefined ? receivedQuantity - acceptedQuantity : number(suppliedRejectedQuantity, `items[${line.grn_item_id}].rejected_quantity`);
+      if (receivedQuantity < 0) throw new ValidationError('received_quantity must be greater than or equal to zero');
       if (acceptedQuantity < 0) throw new ValidationError('accepted_quantity must be greater than or equal to zero');
-      if (acceptedQuantity > Number(line.received_quantity)) throw new ValidationError('accepted_quantity cannot exceed received_quantity');
+      if (rejectedQuantity < 0) throw new ValidationError('rejected_quantity must be greater than or equal to zero');
+      if (acceptedQuantity > receivedQuantity) throw new ValidationError('accepted_quantity cannot exceed received_quantity');
+      if (rejectedQuantity > receivedQuantity) throw new ValidationError('rejected_quantity cannot exceed received_quantity');
+      if (acceptedQuantity + rejectedQuantity !== receivedQuantity) throw new ValidationError('accepted_quantity plus rejected_quantity must equal received_quantity');
       if (inspectionStatus === 'FAILED' && acceptedQuantity !== 0) throw new ValidationError('FAILED GRNs must have zero accepted quantity');
 
       if (line.purchase_order_item_id && grn.purchase_order) {
@@ -108,6 +130,8 @@ async function postGrn(req, res) {
         if (acceptedQuantity > remainingQuantity) throw new ValidationError('accepted_quantity cannot exceed the remaining purchase order quantity');
       }
       acceptedQuantities.set(line.grn_item_id.toString(), acceptedQuantity);
+      rejectedQuantities.set(line.grn_item_id.toString(), rejectedQuantity);
+      if (rejectionReasonByLine.has(String(line.grn_item_id))) rejectionReasons.set(line.grn_item_id.toString(), rejectionReasonByLine.get(String(line.grn_item_id)));
     }
     for (const item of Array.isArray(req.body.items) ? req.body.items : []) {
       if (!grn.grn_item.some((line) => line.grn_item_id.toString() === String(item.grn_item_id))) throw new ValidationError('Each item must belong to this GRN');
@@ -115,7 +139,9 @@ async function postGrn(req, res) {
 
     for (const line of grn.grn_item) {
       const acceptedQuantity = acceptedQuantities.get(line.grn_item_id.toString());
-      await tx.grn_item.update({ where: { grn_item_id: line.grn_item_id }, data: { accepted_quantity: acceptedQuantity } });
+      const rejectedQuantity = rejectedQuantities.get(line.grn_item_id.toString());
+      const rejectionReason = rejectionReasons.get(line.grn_item_id.toString());
+      await tx.grn_item.update({ where: { grn_item_id: line.grn_item_id }, data: { accepted_quantity: acceptedQuantity, rejected_quantity: rejectedQuantity, rejection_reason: rejectionReason === undefined ? undefined : rejectionReason } });
       if (acceptedQuantity <= 0) continue;
 
       let lotId = line.lot_id;
@@ -136,6 +162,8 @@ async function postGrn(req, res) {
         }
       }
 
+      const stockLockKey = `${line.inventory_item_id}:${grn.warehouse_id}:${lotId === null ? 'null' : lotId}`;
+      await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtextextended(${stockLockKey}, 0))`;
       const stock = await tx.inventory_stock.findFirst({ where: { inventory_item_id: line.inventory_item_id, warehouse_id: grn.warehouse_id, lot_id: lotId } });
       if (stock) await tx.inventory_stock.update({ where: { inventory_stock_id: stock.inventory_stock_id }, data: { quantity: { increment: acceptedQuantity }, last_updated_at: new Date() } });
       else await tx.inventory_stock.create({ data: { inventory_item_id: line.inventory_item_id, warehouse_id: grn.warehouse_id, lot_id: lotId, quantity: acceptedQuantity } });

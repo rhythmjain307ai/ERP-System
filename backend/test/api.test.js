@@ -67,13 +67,61 @@ async function createReceiptFixture(orderedQuantity, receivedQuantity, options =
   const purchaseOrderId = BigInt(purchaseOrder.body.data.purchase_order_id);
   const purchaseOrderItemId = purchaseOrder.body.data.purchase_order_item[0].purchase_order_item_id;
   context.created.purchaseOrderIds.push(purchaseOrderId);
-  const grnItem = { purchase_order_item_id: purchaseOrderItemId, inventory_item_id: options.grnInventoryItemId || purchaseOrderItem.inventory_item_id, uom: options.grnUom || purchaseOrderItem.uom, received_quantity: receivedQuantity, lot_id: options.lotId };
+  const grnItem = { purchase_order_item_id: purchaseOrderItemId, inventory_item_id: options.grnInventoryItemId || purchaseOrderItem.inventory_item_id, uom: options.grnUom || purchaseOrderItem.uom, received_quantity: receivedQuantity, lot_id: options.lotId, accepted_quantity: options.acceptedQuantity, rejected_quantity: options.rejectedQuantity, rejection_reason: options.rejectionReason };
   const grn = await request(app).post('/api/procurement/grns').set('Authorization', context.auth).send({ grn_number: `GRN-${suffix}`, purchase_order_id: purchaseOrderId.toString(), vendor_id: options.grnVendorId || options.purchaseOrderVendorId || context.vendorId, warehouse_id: context.warehouseId, items: [grnItem] });
   assert.equal(grn.status, 201);
   const grnId = BigInt(grn.body.data.grn_id);
   context.created.grnIds.push(grnId);
   return { purchaseOrderId, grnId, grnItemId: BigInt(grn.body.data.grn_item[0].grn_item_id) };
 }
+
+test('persists accepted and rejected quantities with rejection reason', { skip: !integration }, async () => {
+  const fixture = await createReceiptFixture(100, 100, { acceptedQuantity: 80, rejectedQuantity: 20, rejectionReason: 'Damaged material' });
+  const before = await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } });
+  const beforeMovements = await prisma.stock_movement.count({ where: { reference_id: fixture.grnId, movement_type: 'PURCHASE_RECEIPT' } });
+  const response = await request(app).post(`/api/procurement/grns/${fixture.grnId}/post`).set('Authorization', context.auth).send({ inspection_status: 'PARTIAL', items: [{ grn_item_id: fixture.grnItemId.toString(), accepted_quantity: 80, rejected_quantity: 20, rejection_reason: 'Damaged material' }] });
+  assert.equal(response.status, 200);
+  const grnItem = await prisma.grn_item.findUnique({ where: { grn_item_id: fixture.grnItemId } });
+  const after = await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } });
+  assert.equal(Number(grnItem.received_quantity), 100);
+  assert.equal(Number(grnItem.accepted_quantity), 80);
+  assert.equal(Number(grnItem.rejected_quantity), 20);
+  assert.equal(grnItem.rejection_reason, 'Damaged material');
+  assert.equal(Number(after?.quantity || 0) - Number(before?.quantity || 0), 80);
+  assert.equal(await prisma.stock_movement.count({ where: { reference_id: fixture.grnId, movement_type: 'PURCHASE_RECEIPT' } }), beforeMovements + 1);
+});
+
+test('rejects a PO-linked GRN with an unlinked item', { skip: !integration }, async () => {
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const purchaseOrder = await request(app).post('/api/procurement/purchase-orders').set('Authorization', context.auth).send({ po_number: `PO-UNLINKED-${suffix}`, vendor_id: context.vendorId, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', ordered_quantity: 5 }] });
+  assert.equal(purchaseOrder.status, 201);
+  const purchaseOrderId = BigInt(purchaseOrder.body.data.purchase_order_id);
+  context.created.purchaseOrderIds.push(purchaseOrderId);
+  const response = await request(app).post('/api/procurement/grns').set('Authorization', context.auth).send({ grn_number: `GRN-UNLINKED-${suffix}`, purchase_order_id: purchaseOrderId.toString(), vendor_id: context.vendorId, warehouse_id: context.warehouseId, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', received_quantity: 5 }] });
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /PO-linked GRN items must reference a purchase order item/);
+});
+
+test('supports a non-PO GRN', { skip: !integration }, async () => {
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const grn = await request(app).post('/api/procurement/grns').set('Authorization', context.auth).send({ grn_number: `GRN-NO-PO-${suffix}`, vendor_id: context.vendorId, warehouse_id: context.warehouseId, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', received_quantity: 5 }] });
+  assert.equal(grn.status, 201);
+  context.created.grnIds.push(BigInt(grn.body.data.grn_id));
+});
+
+test('rejects rejected quantity whose sum exceeds received quantity', { skip: !integration }, async () => {
+  const fixture = await createReceiptFixture(100, 100);
+  const response = await request(app).post(`/api/procurement/grns/${fixture.grnId}/post`).set('Authorization', context.auth).send({ inspection_status: 'PARTIAL', items: [{ grn_item_id: fixture.grnItemId.toString(), accepted_quantity: 80, rejected_quantity: 21 }] });
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /must equal received_quantity/);
+});
+
+test('rejects rejected quantity whose sum is below received quantity', { skip: !integration }, async () => {
+  const fixture = await createReceiptFixture(100, 100);
+  const response = await request(app).post(`/api/procurement/grns/${fixture.grnId}/post`).set('Authorization', context.auth).send({ inspection_status: 'PARTIAL', items: [{ grn_item_id: fixture.grnItemId.toString(), accepted_quantity: 80, rejected_quantity: 19 }] });
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /must equal received_quantity/);
+});
 
 test('posts a fully accepted GRN and receives the purchase order', { skip: !integration }, async () => {
   const fixture = await createReceiptFixture(5, 5);
@@ -134,6 +182,47 @@ test('serializes concurrent GRN posting so only one request succeeds', { skip: !
   const after = await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } });
   assert.equal(Number(after.quantity) - Number(before?.quantity || 0), 5);
   assert.equal(await prisma.stock_movement.count({ where: { reference_type: 'GRN', reference_id: fixture.grnId, movement_type: 'PURCHASE_RECEIPT' } }), 1);
+});
+
+async function createConcurrentReceiptFixtures({ lotId, inventoryItemId = context.inventoryItemId, orderedQuantity = 10 }) {
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const purchaseOrder = await request(app).post('/api/procurement/purchase-orders').set('Authorization', context.auth).send({ po_number: `PO-CONCURRENT-${suffix}`, vendor_id: context.vendorId, items: [{ inventory_item_id: inventoryItemId, uom: 'EA', ordered_quantity: orderedQuantity }] });
+  assert.equal(purchaseOrder.status, 201);
+  const purchaseOrderId = BigInt(purchaseOrder.body.data.purchase_order_id);
+  const purchaseOrderItemId = purchaseOrder.body.data.purchase_order_item[0].purchase_order_item_id;
+  context.created.purchaseOrderIds.push(purchaseOrderId);
+  const grnIds = [];
+  for (const [index, receivedQuantity] of [4, 6].entries()) {
+    const grn = await request(app).post('/api/procurement/grns').set('Authorization', context.auth).send({ grn_number: `GRN-CONCURRENT-${suffix}-${index}`, purchase_order_id: purchaseOrderId.toString(), vendor_id: context.vendorId, warehouse_id: context.warehouseId, items: [{ purchase_order_item_id: purchaseOrderItemId, inventory_item_id: inventoryItemId, uom: 'EA', received_quantity: receivedQuantity, lot_id: lotId }] });
+    assert.equal(grn.status, 201);
+    const grnId = BigInt(grn.body.data.grn_id);
+    context.created.grnIds.push(grnId);
+    grnIds.push({ grnId, grnItemId: BigInt(grn.body.data.grn_item[0].grn_item_id), acceptedQuantity: receivedQuantity });
+  }
+  return { grnIds, inventoryItemId: BigInt(inventoryItemId), warehouseId: BigInt(context.warehouseId), lotId: lotId === undefined ? null : BigInt(lotId) };
+}
+
+test('posts different no-lot GRNs concurrently into one stock row', { skip: !integration }, async () => {
+  const fixture = await createConcurrentReceiptFixtures({});
+  const before = await prisma.inventory_stock.findMany({ where: { inventory_item_id: fixture.inventoryItemId, warehouse_id: fixture.warehouseId, lot_id: null } });
+  const responses = await Promise.all(fixture.grnIds.map((item) => request(app).post(`/api/procurement/grns/${item.grnId}/post`).set('Authorization', context.auth).send({ inspection_status: 'PASSED', items: [{ grn_item_id: item.grnItemId.toString(), accepted_quantity: item.acceptedQuantity }] })));
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 200]);
+  const after = await prisma.inventory_stock.findMany({ where: { inventory_item_id: fixture.inventoryItemId, warehouse_id: fixture.warehouseId, lot_id: null } });
+  assert.equal(after.length, 1);
+  assert.equal(Number(after[0].quantity) - Number(before[0]?.quantity || 0), 10);
+  for (const item of fixture.grnIds) assert.equal(await prisma.stock_movement.count({ where: { reference_type: 'GRN', reference_id: item.grnId, movement_type: 'PURCHASE_RECEIPT' } }), 1);
+});
+
+test('posts different same-lot GRNs concurrently into one stock row', { skip: !integration }, async () => {
+  const lot = await prisma.inventory_lot.create({ data: { inventory_item_id: BigInt(context.lotInventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_number: `CONCURRENT-LOT-${Date.now()}`, heat_number: 'CONCURRENT-HEAT', quantity_received: 0, accepted_quantity: 0 } });
+  const fixture = await createConcurrentReceiptFixtures({ lotId: lot.lot_id.toString(), inventoryItemId: context.lotInventoryItemId });
+  const before = await prisma.inventory_stock.findMany({ where: { inventory_item_id: fixture.inventoryItemId, warehouse_id: fixture.warehouseId, lot_id: fixture.lotId } });
+  const responses = await Promise.all(fixture.grnIds.map((item) => request(app).post(`/api/procurement/grns/${item.grnId}/post`).set('Authorization', context.auth).send({ inspection_status: 'PASSED', items: [{ grn_item_id: item.grnItemId.toString(), accepted_quantity: item.acceptedQuantity }] })));
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 200]);
+  const after = await prisma.inventory_stock.findMany({ where: { inventory_item_id: fixture.inventoryItemId, warehouse_id: fixture.warehouseId, lot_id: fixture.lotId } });
+  assert.equal(after.length, 1);
+  assert.equal(Number(after[0].quantity) - Number(before[0]?.quantity || 0), 10);
+  for (const item of fixture.grnIds) assert.equal(await prisma.stock_movement.count({ where: { reference_type: 'GRN', reference_id: item.grnId, movement_type: 'PURCHASE_RECEIPT' } }), 1);
 });
 
 test('rejects an existing lot owned by a different item without changing it', { skip: !integration }, async () => {
