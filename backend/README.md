@@ -55,6 +55,7 @@ Transactional creation endpoints:
 - `POST /api/procurement/grns/:id/post` (inspect a pending GRN and post accepted quantities to inventory)
 - `POST /api/sales/orders`
 - `POST /api/sales/deliveries`
+- `POST /api/sales/deliveries/:id/dispatch` (protected by `inventory.write`; deducts available stock atomically)
 - `POST /api/sales/invoices`
 - `POST /api/documents`
 - `PATCH /api/documents/reviews/:id`
@@ -85,7 +86,7 @@ Purchase orders, GRNs, customer orders, and deliveries use the same `items` shap
 
 ## Deferred workflows
 
-GRN posting creates inventory stock and `PURCHASE_RECEIPT` stock movements. Sales deductions, production movements, inventory transfers, job-work movements, accounting posting, payment allocation, and automatic approval transitions remain deferred. Future payment settlement must use `payment_allocation`; no API in this foundation treats direct invoice references on `payment` as a settlement source.
+GRN posting creates inventory stock and `PURCHASE_RECEIPT` stock movements. Delivery dispatch creates `SALE_ISSUE` movements and deducts stock atomically; insufficient stock blocks the complete dispatch. Partial dispatch, production movements, inventory transfers, job-work movements, accounting posting, payment allocation, and automatic approval transitions remain deferred. Future payment settlement must use `payment_allocation`; no API in this foundation treats direct invoice references on `payment` as a settlement source.
 
 ## Tests
 

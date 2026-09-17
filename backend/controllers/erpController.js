@@ -1,6 +1,13 @@
 const prisma = require('../lib/prisma');
 const { ApiError, NotFoundError, ValidationError } = require('../lib/errors');
 
+async function lockStockBalance(tx, inventoryItemId, warehouseId, lotId) {
+  const key = `${inventoryItemId}:${warehouseId}:${lotId || 'null'}`;
+  await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtextextended(${key}, 0::bigint))`;
+  const rows = await tx.$queryRaw`SELECT "inventory_stock_id", "quantity", "reserved_quantity" FROM "public"."inventory_stock" WHERE "inventory_item_id" = ${inventoryItemId} AND "warehouse_id" = ${warehouseId} AND "lot_id" IS NOT DISTINCT FROM ${lotId} FOR UPDATE`;
+  return rows[0] || null;
+}
+
 const id = (value, field = 'id') => {
   try { return BigInt(value); } catch { throw new ValidationError(`${field} must be an integer`); }
 };
@@ -162,9 +169,7 @@ async function postGrn(req, res) {
         }
       }
 
-      const stockLockKey = `${line.inventory_item_id}:${grn.warehouse_id}:${lotId === null ? 'null' : lotId}`;
-      await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtextextended(${stockLockKey}, 0))`;
-      const stock = await tx.inventory_stock.findFirst({ where: { inventory_item_id: line.inventory_item_id, warehouse_id: grn.warehouse_id, lot_id: lotId } });
+      const stock = await lockStockBalance(tx, line.inventory_item_id, grn.warehouse_id, lotId);
       if (stock) await tx.inventory_stock.update({ where: { inventory_stock_id: stock.inventory_stock_id }, data: { quantity: { increment: acceptedQuantity }, last_updated_at: new Date() } });
       else await tx.inventory_stock.create({ data: { inventory_item_id: line.inventory_item_id, warehouse_id: grn.warehouse_id, lot_id: lotId, quantity: acceptedQuantity } });
       await tx.stock_movement.create({ data: { inventory_item_id: line.inventory_item_id, warehouse_id: grn.warehouse_id, lot_id: lotId, movement_type: 'PURCHASE_RECEIPT', reference_type: 'GRN', reference_id: grn.grn_id, quantity: acceptedQuantity, movement_date: new Date(), remarks: `GRN ${grn.grn_number}` } });
@@ -191,8 +196,103 @@ async function createCustomerOrder(req, res) {
 async function createDelivery(req, res) {
   required(req.body, ['delivery_number', 'customer_id']);
   return createWithItems(req, res, 'delivery', 'delivery_item', 'delivery_id', 'delivery_item', {
-    delivery_number: req.body.delivery_number, customer_id: id(req.body.customer_id, 'customer_id'), customer_order_id: req.body.customer_order_id === undefined ? undefined : id(req.body.customer_order_id, 'customer_order_id'), sales_invoice_id: req.body.sales_invoice_id === undefined ? undefined : id(req.body.sales_invoice_id, 'sales_invoice_id'), warehouse_id: req.body.warehouse_id === undefined ? undefined : id(req.body.warehouse_id, 'warehouse_id'), delivery_date: date(req.body.delivery_date), status: req.body.status, remarks: req.body.remarks
+    delivery_number: req.body.delivery_number, customer_id: id(req.body.customer_id, 'customer_id'), customer_order_id: req.body.customer_order_id === undefined ? undefined : id(req.body.customer_order_id, 'customer_order_id'), sales_invoice_id: req.body.sales_invoice_id === undefined ? undefined : id(req.body.sales_invoice_id, 'sales_invoice_id'), warehouse_id: req.body.warehouse_id === undefined ? undefined : id(req.body.warehouse_id, 'warehouse_id'), delivery_date: date(req.body.delivery_date), status: 'DRAFT', remarks: req.body.remarks
   }, (parent, item) => ({ delivery_id: parent.delivery_id, customer_order_item_id: item.customer_order_item_id === undefined ? undefined : id(item.customer_order_item_id, 'customer_order_item_id'), sales_invoice_item_id: item.sales_invoice_item_id === undefined ? undefined : id(item.sales_invoice_item_id, 'sales_invoice_item_id'), inventory_item_id: id(item.inventory_item_id, 'inventory_item_id'), lot_id: item.lot_id === undefined ? undefined : id(item.lot_id, 'lot_id'), description: item.description, uom: item.uom, ordered_quantity: item.ordered_quantity === undefined ? undefined : number(item.ordered_quantity, 'ordered_quantity'), delivered_quantity: number(item.delivered_quantity ?? item.quantity, 'delivered_quantity'), weight_kg: item.weight_kg === undefined ? undefined : number(item.weight_kg, 'weight_kg'), remarks: item.remarks }));
+}
+
+async function dispatchDelivery(req, res) {
+  const deliveryId = id(req.params.id, 'id');
+  const result = await prisma.$transaction(async (tx) => {
+    const lockedDelivery = await tx.$queryRaw`SELECT "delivery_id" FROM "public"."delivery" WHERE "delivery_id" = ${deliveryId} FOR UPDATE`;
+    if (lockedDelivery.length === 0) throw new NotFoundError('delivery');
+
+    const delivery = await tx.delivery.findUnique({
+      where: { delivery_id: deliveryId },
+      include: {
+        delivery_item: { include: { inventory_item: true } },
+        customer_order: { include: { customer_order_item: true } },
+        sales_invoice: { include: { sales_invoice_item: true } }
+      }
+    });
+    if (!delivery) throw new NotFoundError('delivery');
+    if (!['DRAFT', 'READY'].includes(delivery.status)) throw new ApiError(409, `Delivery is already ${delivery.status}`);
+    if (!delivery.warehouse_id) throw new ValidationError('Delivery warehouse_id is required before dispatch');
+    if (delivery.customer_order_id && !delivery.customer_order) throw new ValidationError('Delivery customer order could not be found');
+    if (delivery.sales_invoice_id && !delivery.sales_invoice) throw new ValidationError('Delivery sales invoice could not be found');
+    if (delivery.customer_order && delivery.customer_id !== delivery.customer_order.customer_id) throw new ValidationError('Delivery customer must match the customer-order customer');
+    if (delivery.sales_invoice && delivery.customer_id !== delivery.sales_invoice.customer_id) throw new ValidationError('Delivery customer must match the sales-invoice customer');
+    if (delivery.customer_order && delivery.sales_invoice && delivery.customer_order.customer_id !== delivery.sales_invoice.customer_id) throw new ValidationError('Customer order and sales invoice must belong to the same customer');
+
+    const customerOrderItems = new Map((delivery.customer_order?.customer_order_item || []).map((item) => [item.customer_order_item_id.toString(), item]));
+    const salesInvoiceItems = new Map((delivery.sales_invoice?.sales_invoice_item || []).map((item) => [item.sales_invoice_item_id.toString(), item]));
+    const stockLines = [];
+    const linkedLines = new Map();
+    for (const line of delivery.delivery_item) {
+      const deliveredQuantity = Number(line.delivered_quantity);
+      if (!Number.isFinite(deliveredQuantity) || deliveredQuantity <= 0) throw new ValidationError(`Delivery item ${line.delivery_item_id} delivered_quantity must be greater than zero`);
+
+      if (line.customer_order_item_id) {
+        const orderItem = customerOrderItems.get(line.customer_order_item_id.toString());
+        if (!orderItem || orderItem.inventory_item_id !== line.inventory_item_id || orderItem.uom !== line.uom) throw new ValidationError(`Delivery item ${line.delivery_item_id} does not match its customer-order item`);
+      }
+      if (line.sales_invoice_item_id) {
+        const invoiceItem = salesInvoiceItems.get(line.sales_invoice_item_id.toString());
+        if (!invoiceItem || invoiceItem.inventory_item_id !== line.inventory_item_id || invoiceItem.uom !== line.uom) throw new ValidationError(`Delivery item ${line.delivery_item_id} does not match its sales-invoice item`);
+      }
+      if (line.customer_order_item_id) linkedLines.set(`order:${line.customer_order_item_id}`, { type: 'customer order', id: line.customer_order_item_id, limit: customerOrderItems.get(line.customer_order_item_id.toString()).ordered_quantity, quantityField: 'ordered_quantity', requested: (linkedLines.get(`order:${line.customer_order_item_id}`)?.requested || 0) + deliveredQuantity });
+      if (line.sales_invoice_item_id) linkedLines.set(`invoice:${line.sales_invoice_item_id}`, { type: 'sales invoice', id: line.sales_invoice_item_id, limit: salesInvoiceItems.get(line.sales_invoice_item_id.toString()).quantity, quantityField: 'quantity', requested: (linkedLines.get(`invoice:${line.sales_invoice_item_id}`)?.requested || 0) + deliveredQuantity });
+      if (line.lot_id) {
+        const lot = await tx.inventory_lot.findUnique({ where: { lot_id: line.lot_id } });
+        if (!lot || lot.inventory_item_id !== line.inventory_item_id || lot.warehouse_id !== delivery.warehouse_id) throw new ValidationError(`Delivery item ${line.delivery_item_id} lot does not match the item and warehouse`);
+      }
+      stockLines.push({ line, deliveredQuantity, key: `${line.inventory_item_id}:${delivery.warehouse_id}:${line.lot_id || 'null'}` });
+    }
+
+    for (const linkedLine of [...linkedLines.values()].sort((left, right) => `${left.type}:${left.id}`.localeCompare(`${right.type}:${right.id}`))) {
+      const lockKey = `delivery-limit:${linkedLine.type}:${linkedLine.id}`;
+      await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtextextended(${lockKey}, 0::bigint))`;
+      const previous = await tx.delivery_item.aggregate({
+        where: {
+          [linkedLine.type === 'customer order' ? 'customer_order_item_id' : 'sales_invoice_item_id']: linkedLine.id,
+          delivery_id: { not: delivery.delivery_id },
+          delivery: { status: { in: ['DISPATCHED', 'DELIVERED'] } }
+        },
+        _sum: { delivered_quantity: true }
+      });
+      const previousQuantity = Number(previous._sum.delivered_quantity || 0);
+      const totalQuantity = previousQuantity + linkedLine.requested;
+      const limit = Number(linkedLine.limit);
+      if (totalQuantity > limit) {
+        const excess = totalQuantity - limit;
+        throw new ValidationError(`Delivery ${linkedLine.type} line ${linkedLine.id} exceeds ${linkedLine.quantityField} ${limit}: previously dispatched ${previousQuantity}, current requested ${linkedLine.requested}, excess ${excess}`);
+      }
+    }
+
+    const stockBalances = new Map();
+    const requestedByStock = new Map();
+    for (const stockLine of stockLines.sort((left, right) => left.key.localeCompare(right.key))) {
+      const { line, deliveredQuantity, key } = stockLine;
+      if (!stockBalances.has(key)) {
+        stockBalances.set(key, await lockStockBalance(tx, line.inventory_item_id, delivery.warehouse_id, line.lot_id));
+      }
+      const stock = stockBalances.get(key);
+      const available = stock ? Number(stock.quantity) - Number(stock.reserved_quantity) : 0;
+      const alreadyRequested = requestedByStock.get(key) || 0;
+      const requested = alreadyRequested + deliveredQuantity;
+      if (!stock) throw new ValidationError(`Insufficient stock for item ${line.inventory_item_id} in warehouse ${delivery.warehouse_id}: requested ${requested}, available ${available}, shortage ${requested - available}`);
+      if (requested > available) throw new ValidationError(`Insufficient stock for item ${line.inventory_item_id} in warehouse ${delivery.warehouse_id}: requested ${requested}, available ${available}, shortage ${requested - available}`);
+      requestedByStock.set(key, requested);
+    }
+
+    for (const stockLine of stockLines) {
+      const stock = stockBalances.get(stockLine.key);
+      await tx.inventory_stock.update({ where: { inventory_stock_id: stock.inventory_stock_id }, data: { quantity: { decrement: stockLine.deliveredQuantity }, last_updated_at: new Date() } });
+      await tx.stock_movement.create({ data: { inventory_item_id: stockLine.line.inventory_item_id, warehouse_id: delivery.warehouse_id, lot_id: stockLine.line.lot_id, movement_type: 'SALE_ISSUE', reference_type: 'DELIVERY', reference_id: delivery.delivery_id, quantity: stockLine.deliveredQuantity, movement_date: new Date(), remarks: `Delivery ${delivery.delivery_number}` } });
+    }
+
+    return tx.delivery.update({ where: { delivery_id: delivery.delivery_id }, data: { status: 'DISPATCHED' }, include: { delivery_item: true } });
+  });
+  res.json({ success: true, data: result });
 }
 
 async function createSalesInvoice(req, res) {
@@ -250,4 +350,4 @@ async function submitApprovalAction(req, res) {
   res.status(201).json({ success: true, data: action });
 }
 
-module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, createSalesInvoice, createDocument, getDocument, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
+module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, createSalesInvoice, createDocument, getDocument, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
