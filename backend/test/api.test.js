@@ -69,7 +69,7 @@ async function resetStock(quantity, inventoryItemId = context.inventoryItemId, l
 async function createDeliveryFixture(options = {}) {
   const response = await request(app).post('/api/sales/deliveries').set('Authorization', context.auth).send({
     delivery_number: `DEL-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
-    customer_id: context.customerId,
+    customer_id: options.customerId || context.customerId,
     customer_order_id: options.customerOrderId,
     sales_invoice_id: options.salesInvoiceId,
     warehouse_id: context.warehouseId,
@@ -194,6 +194,160 @@ test('serializes simultaneous deliveries consuming one stock balance', { skip: !
   const stock = await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } });
   assert.equal(Number(stock.quantity), 1);
   assert.equal(await prisma.stock_movement.count({ where: { reference_type: 'DELIVERY', reference_id: { in: [first.deliveryId, second.deliveryId] }, movement_type: 'SALE_ISSUE' } }), 1);
+});
+
+test('rejects a delivery whose customer differs from its customer order', { skip: !integration }, async () => {
+  await resetStock(10);
+  const order = await request(app).post('/api/sales/orders').set('Authorization', context.auth).send({ order_number: `SO-CUSTOMER-${Date.now()}`, customer_id: context.otherCustomerId, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', ordered_quantity: 5 }] });
+  assert.equal(order.status, 201);
+  const orderId = BigInt(order.body.data.customer_order_id);
+  const orderItemId = order.body.data.customer_order_item[0].customer_order_item_id;
+  context.created.orderIds.push(orderId);
+  const fixture = await createDeliveryFixture({ customerOrderId: orderId.toString(), customerOrderItemId: orderItemId, quantity: 2 });
+  const response = await dispatch(fixture.deliveryId);
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /customer-order customer/);
+  const delivery = await prisma.delivery.findUnique({ where: { delivery_id: fixture.deliveryId } });
+  const stock = await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } });
+  assert.equal(delivery.status, 'DRAFT');
+  assert.equal(Number(stock.quantity), 10);
+  assert.equal(await prisma.stock_movement.count({ where: { reference_type: 'DELIVERY', reference_id: fixture.deliveryId } }), 0);
+});
+
+test('rejects a delivery whose customer differs from its sales invoice', { skip: !integration }, async () => {
+  await resetStock(10);
+  const invoice = await request(app).post('/api/sales/invoices').set('Authorization', context.auth).send({ invoice_number: `INV-CUSTOMER-${Date.now()}`, customer_id: context.otherCustomerId, items: [{ inventory_item_id: context.inventoryItemId, description: 'Customer mismatch', uom: 'EA', quantity: 5 }] });
+  assert.equal(invoice.status, 201);
+  const invoiceId = BigInt(invoice.body.data.sales_invoice_id);
+  const invoiceItemId = invoice.body.data.sales_invoice_item[0].sales_invoice_item_id;
+  context.created.invoiceIds.push(invoiceId);
+  const fixture = await createDeliveryFixture({ salesInvoiceId: invoiceId.toString(), salesInvoiceItemId: invoiceItemId, quantity: 2 });
+  const response = await dispatch(fixture.deliveryId);
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /sales-invoice customer/);
+  const delivery = await prisma.delivery.findUnique({ where: { delivery_id: fixture.deliveryId } });
+  const stock = await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } });
+  assert.equal(delivery.status, 'DRAFT');
+  assert.equal(Number(stock.quantity), 10);
+  assert.equal(await prisma.stock_movement.count({ where: { reference_type: 'DELIVERY', reference_id: fixture.deliveryId } }), 0);
+});
+
+test('rejects linked order and invoice records belonging to different customers', { skip: !integration }, async () => {
+  await resetStock(10);
+  const order = await request(app).post('/api/sales/orders').set('Authorization', context.auth).send({ order_number: `SO-BOTH-CUSTOMER-${Date.now()}`, customer_id: context.customerId, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', ordered_quantity: 5 }] });
+  const invoice = await request(app).post('/api/sales/invoices').set('Authorization', context.auth).send({ invoice_number: `INV-BOTH-CUSTOMER-${Date.now()}`, customer_id: context.otherCustomerId, items: [{ inventory_item_id: context.inventoryItemId, description: 'Different customer', uom: 'EA', quantity: 5 }] });
+  assert.equal(order.status, 201);
+  assert.equal(invoice.status, 201);
+  const orderId = BigInt(order.body.data.customer_order_id);
+  const invoiceId = BigInt(invoice.body.data.sales_invoice_id);
+  context.created.orderIds.push(orderId);
+  context.created.invoiceIds.push(invoiceId);
+  const fixture = await createDeliveryFixture({ customerOrderId: orderId.toString(), customerOrderItemId: order.body.data.customer_order_item[0].customer_order_item_id, salesInvoiceId: invoiceId.toString(), salesInvoiceItemId: invoice.body.data.sales_invoice_item[0].sales_invoice_item_id, quantity: 2 });
+  const response = await dispatch(fixture.deliveryId);
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /sales-invoice customer/);
+  const delivery = await prisma.delivery.findUnique({ where: { delivery_id: fixture.deliveryId } });
+  assert.equal(delivery.status, 'DRAFT');
+  assert.equal(await prisma.stock_movement.count({ where: { reference_type: 'DELIVERY', reference_id: fixture.deliveryId } }), 0);
+});
+
+test('dispatches exactly the customer order line quantity', { skip: !integration }, async () => {
+  await resetStock(10);
+  const order = await request(app).post('/api/sales/orders').set('Authorization', context.auth).send({ order_number: `SO-EXACT-${Date.now()}`, customer_id: context.customerId, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', ordered_quantity: 5 }] });
+  assert.equal(order.status, 201);
+  const orderId = BigInt(order.body.data.customer_order_id);
+  const orderItemId = order.body.data.customer_order_item[0].customer_order_item_id;
+  context.created.orderIds.push(orderId);
+  const fixture = await createDeliveryFixture({ customerOrderId: orderId.toString(), customerOrderItemId: orderItemId, quantity: 5 });
+  assert.equal((await dispatch(fixture.deliveryId)).status, 200);
+  const delivered = await prisma.delivery_item.aggregate({ where: { customer_order_item_id: BigInt(orderItemId), delivery: { status: { in: ['DISPATCHED', 'DELIVERED'] } } }, _sum: { delivered_quantity: true } });
+  assert.equal(Number(delivered._sum.delivered_quantity), 5);
+});
+
+test('rejects an order over-delivery without changing stock', { skip: !integration }, async () => {
+  await resetStock(10);
+  const order = await request(app).post('/api/sales/orders').set('Authorization', context.auth).send({ order_number: `SO-OVER-${Date.now()}`, customer_id: context.customerId, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', ordered_quantity: 5 }] });
+  assert.equal(order.status, 201);
+  const orderId = BigInt(order.body.data.customer_order_id);
+  const orderItemId = order.body.data.customer_order_item[0].customer_order_item_id;
+  context.created.orderIds.push(orderId);
+  const first = await createDeliveryFixture({ customerOrderId: orderId.toString(), customerOrderItemId: orderItemId, quantity: 4 });
+  assert.equal((await dispatch(first.deliveryId)).status, 200);
+  const second = await createDeliveryFixture({ customerOrderId: orderId.toString(), customerOrderItemId: orderItemId, quantity: 2 });
+  const before = await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } });
+  const response = await dispatch(second.deliveryId);
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /ordered_quantity 5/);
+  assert.match(response.body.error.message, /previously dispatched 4/);
+  assert.match(response.body.error.message, /current requested 2/);
+  assert.match(response.body.error.message, /excess 1/);
+  const after = await prisma.inventory_stock.findUnique({ where: { inventory_stock_id: before.inventory_stock_id } });
+  assert.equal(String(after.quantity), String(before.quantity));
+  assert.equal((await prisma.delivery.findUnique({ where: { delivery_id: second.deliveryId } })).status, 'DRAFT');
+});
+
+test('dispatches exactly the sales invoice line quantity', { skip: !integration }, async () => {
+  await resetStock(10);
+  const invoice = await request(app).post('/api/sales/invoices').set('Authorization', context.auth).send({ invoice_number: `INV-EXACT-${Date.now()}`, customer_id: context.customerId, items: [{ inventory_item_id: context.inventoryItemId, description: 'Exact', uom: 'EA', quantity: 5 }] });
+  assert.equal(invoice.status, 201);
+  const invoiceId = BigInt(invoice.body.data.sales_invoice_id);
+  const invoiceItemId = invoice.body.data.sales_invoice_item[0].sales_invoice_item_id;
+  context.created.invoiceIds.push(invoiceId);
+  const fixture = await createDeliveryFixture({ salesInvoiceId: invoiceId.toString(), salesInvoiceItemId: invoiceItemId, quantity: 5 });
+  assert.equal((await dispatch(fixture.deliveryId)).status, 200);
+  const delivered = await prisma.delivery_item.aggregate({ where: { sales_invoice_item_id: BigInt(invoiceItemId), delivery: { status: { in: ['DISPATCHED', 'DELIVERED'] } } }, _sum: { delivered_quantity: true } });
+  assert.equal(Number(delivered._sum.delivered_quantity), 5);
+});
+
+test('rejects an invoice over-delivery without changing stock', { skip: !integration }, async () => {
+  await resetStock(10);
+  const invoice = await request(app).post('/api/sales/invoices').set('Authorization', context.auth).send({ invoice_number: `INV-OVER-${Date.now()}`, customer_id: context.customerId, items: [{ inventory_item_id: context.inventoryItemId, description: 'Over', uom: 'EA', quantity: 5 }] });
+  assert.equal(invoice.status, 201);
+  const invoiceId = BigInt(invoice.body.data.sales_invoice_id);
+  const invoiceItemId = invoice.body.data.sales_invoice_item[0].sales_invoice_item_id;
+  context.created.invoiceIds.push(invoiceId);
+  const first = await createDeliveryFixture({ salesInvoiceId: invoiceId.toString(), salesInvoiceItemId: invoiceItemId, quantity: 4 });
+  assert.equal((await dispatch(first.deliveryId)).status, 200);
+  const second = await createDeliveryFixture({ salesInvoiceId: invoiceId.toString(), salesInvoiceItemId: invoiceItemId, quantity: 2 });
+  const before = await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } });
+  const response = await dispatch(second.deliveryId);
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /quantity 5/);
+  assert.match(response.body.error.message, /previously dispatched 4/);
+  assert.match(response.body.error.message, /current requested 2/);
+  assert.match(response.body.error.message, /excess 1/);
+  const after = await prisma.inventory_stock.findUnique({ where: { inventory_stock_id: before.inventory_stock_id } });
+  assert.equal(String(after.quantity), String(before.quantity));
+});
+
+test('serializes simultaneous deliveries for one customer order line', { skip: !integration }, async () => {
+  await resetStock(10);
+  const order = await request(app).post('/api/sales/orders').set('Authorization', context.auth).send({ order_number: `SO-CONCURRENT-LIMIT-${Date.now()}`, customer_id: context.customerId, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', ordered_quantity: 5 }] });
+  assert.equal(order.status, 201);
+  const orderId = BigInt(order.body.data.customer_order_id);
+  const orderItemId = order.body.data.customer_order_item[0].customer_order_item_id;
+  context.created.orderIds.push(orderId);
+  const first = await createDeliveryFixture({ customerOrderId: orderId.toString(), customerOrderItemId: orderItemId, quantity: 4 });
+  const second = await createDeliveryFixture({ customerOrderId: orderId.toString(), customerOrderItemId: orderItemId, quantity: 4 });
+  const responses = await Promise.all([dispatch(first.deliveryId), dispatch(second.deliveryId)]);
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 400]);
+  const delivered = await prisma.delivery_item.aggregate({ where: { customer_order_item_id: BigInt(orderItemId), delivery: { status: { in: ['DISPATCHED', 'DELIVERED'] } } }, _sum: { delivered_quantity: true } });
+  assert.equal(Number(delivered._sum.delivered_quantity), 4);
+});
+
+test('serializes simultaneous deliveries for one sales invoice line', { skip: !integration }, async () => {
+  await resetStock(10);
+  const invoice = await request(app).post('/api/sales/invoices').set('Authorization', context.auth).send({ invoice_number: `INV-CONCURRENT-LIMIT-${Date.now()}`, customer_id: context.customerId, items: [{ inventory_item_id: context.inventoryItemId, description: 'Concurrent', uom: 'EA', quantity: 5 }] });
+  assert.equal(invoice.status, 201);
+  const invoiceId = BigInt(invoice.body.data.sales_invoice_id);
+  const invoiceItemId = invoice.body.data.sales_invoice_item[0].sales_invoice_item_id;
+  context.created.invoiceIds.push(invoiceId);
+  const first = await createDeliveryFixture({ salesInvoiceId: invoiceId.toString(), salesInvoiceItemId: invoiceItemId, quantity: 4 });
+  const second = await createDeliveryFixture({ salesInvoiceId: invoiceId.toString(), salesInvoiceItemId: invoiceItemId, quantity: 4 });
+  const responses = await Promise.all([dispatch(first.deliveryId), dispatch(second.deliveryId)]);
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 400]);
+  const delivered = await prisma.delivery_item.aggregate({ where: { sales_invoice_item_id: BigInt(invoiceItemId), delivery: { status: { in: ['DISPATCHED', 'DELIVERED'] } } }, _sum: { delivered_quantity: true } });
+  assert.equal(Number(delivered._sum.delivered_quantity), 4);
 });
 
 async function createReceiptFixture(orderedQuantity, receivedQuantity, options = {}) {

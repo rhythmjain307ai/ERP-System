@@ -21,6 +21,7 @@ async function setupIntegration() {
   const factory = await prisma.factory.create({ data: { company_id: company.company_id, factory_code: `F-${suffix}`, factory_name: `Test Factory ${suffix}` } });
   const warehouse = await prisma.warehouse.create({ data: { factory_id: factory.factory_id, warehouse_code: `W-${suffix}`, warehouse_name: `Test Warehouse ${suffix}` } });
   const customer = await prisma.customer.create({ data: { company_id: company.company_id, customer_code: `C-${suffix}`, customer_name: `Test Customer ${suffix}` } });
+  const otherCustomer = await prisma.customer.create({ data: { company_id: company.company_id, customer_code: `C2-${suffix}`, customer_name: `Other Test Customer ${suffix}` } });
   const vendor = await prisma.vendor.create({ data: { company_id: company.company_id, vendor_code: `V-${suffix}`, vendor_name: `Test Vendor ${suffix}` } });
   const otherVendor = await prisma.vendor.create({ data: { company_id: company.company_id, vendor_code: `V2-${suffix}`, vendor_name: `Other Test Vendor ${suffix}` } });
   const inventoryItem = await prisma.inventory_item.create({ data: { item_code: `I-${suffix}`, item_name: `Test Item ${suffix}`, base_uom: 'EA' } });
@@ -41,6 +42,7 @@ async function setupIntegration() {
   return {
     auth: `Bearer ${createAuthToken(user.user_id)}`,
     customerId: customer.customer_id.toString(),
+    otherCustomerId: otherCustomer.customer_id.toString(),
     vendorId: vendor.vendor_id.toString(),
     otherVendorId: otherVendor.vendor_id.toString(),
     warehouseId: warehouse.warehouse_id.toString(),
@@ -70,6 +72,7 @@ async function setupIntegration() {
         prisma.inventory_item.delete({ where: { inventory_item_id: lotInventoryItem.inventory_item_id } }),
         prisma.warehouse.delete({ where: { warehouse_id: warehouse.warehouse_id } }),
         prisma.customer.delete({ where: { customer_id: customer.customer_id } }),
+        prisma.customer.delete({ where: { customer_id: otherCustomer.customer_id } }),
         prisma.vendor.delete({ where: { vendor_id: vendor.vendor_id } }),
         prisma.vendor.delete({ where: { vendor_id: otherVendor.vendor_id } }),
         prisma.factory.delete({ where: { factory_id: factory.factory_id } }),

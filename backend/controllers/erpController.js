@@ -219,10 +219,16 @@ async function dispatchDelivery(req, res) {
     if (!delivery) throw new NotFoundError('delivery');
     if (!['DRAFT', 'READY'].includes(delivery.status)) throw new ApiError(409, `Delivery is already ${delivery.status}`);
     if (!delivery.warehouse_id) throw new ValidationError('Delivery warehouse_id is required before dispatch');
+    if (delivery.customer_order_id && !delivery.customer_order) throw new ValidationError('Delivery customer order could not be found');
+    if (delivery.sales_invoice_id && !delivery.sales_invoice) throw new ValidationError('Delivery sales invoice could not be found');
+    if (delivery.customer_order && delivery.customer_id !== delivery.customer_order.customer_id) throw new ValidationError('Delivery customer must match the customer-order customer');
+    if (delivery.sales_invoice && delivery.customer_id !== delivery.sales_invoice.customer_id) throw new ValidationError('Delivery customer must match the sales-invoice customer');
+    if (delivery.customer_order && delivery.sales_invoice && delivery.customer_order.customer_id !== delivery.sales_invoice.customer_id) throw new ValidationError('Customer order and sales invoice must belong to the same customer');
 
     const customerOrderItems = new Map((delivery.customer_order?.customer_order_item || []).map((item) => [item.customer_order_item_id.toString(), item]));
     const salesInvoiceItems = new Map((delivery.sales_invoice?.sales_invoice_item || []).map((item) => [item.sales_invoice_item_id.toString(), item]));
     const stockLines = [];
+    const linkedLines = new Map();
     for (const line of delivery.delivery_item) {
       const deliveredQuantity = Number(line.delivered_quantity);
       if (!Number.isFinite(deliveredQuantity) || deliveredQuantity <= 0) throw new ValidationError(`Delivery item ${line.delivery_item_id} delivered_quantity must be greater than zero`);
@@ -235,11 +241,33 @@ async function dispatchDelivery(req, res) {
         const invoiceItem = salesInvoiceItems.get(line.sales_invoice_item_id.toString());
         if (!invoiceItem || invoiceItem.inventory_item_id !== line.inventory_item_id || invoiceItem.uom !== line.uom) throw new ValidationError(`Delivery item ${line.delivery_item_id} does not match its sales-invoice item`);
       }
+      if (line.customer_order_item_id) linkedLines.set(`order:${line.customer_order_item_id}`, { type: 'customer order', id: line.customer_order_item_id, limit: customerOrderItems.get(line.customer_order_item_id.toString()).ordered_quantity, quantityField: 'ordered_quantity', requested: (linkedLines.get(`order:${line.customer_order_item_id}`)?.requested || 0) + deliveredQuantity });
+      if (line.sales_invoice_item_id) linkedLines.set(`invoice:${line.sales_invoice_item_id}`, { type: 'sales invoice', id: line.sales_invoice_item_id, limit: salesInvoiceItems.get(line.sales_invoice_item_id.toString()).quantity, quantityField: 'quantity', requested: (linkedLines.get(`invoice:${line.sales_invoice_item_id}`)?.requested || 0) + deliveredQuantity });
       if (line.lot_id) {
         const lot = await tx.inventory_lot.findUnique({ where: { lot_id: line.lot_id } });
         if (!lot || lot.inventory_item_id !== line.inventory_item_id || lot.warehouse_id !== delivery.warehouse_id) throw new ValidationError(`Delivery item ${line.delivery_item_id} lot does not match the item and warehouse`);
       }
       stockLines.push({ line, deliveredQuantity, key: `${line.inventory_item_id}:${delivery.warehouse_id}:${line.lot_id || 'null'}` });
+    }
+
+    for (const linkedLine of [...linkedLines.values()].sort((left, right) => `${left.type}:${left.id}`.localeCompare(`${right.type}:${right.id}`))) {
+      const lockKey = `delivery-limit:${linkedLine.type}:${linkedLine.id}`;
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+      const previous = await tx.delivery_item.aggregate({
+        where: {
+          [linkedLine.type === 'customer order' ? 'customer_order_item_id' : 'sales_invoice_item_id']: linkedLine.id,
+          delivery_id: { not: delivery.delivery_id },
+          delivery: { status: { in: ['DISPATCHED', 'DELIVERED'] } }
+        },
+        _sum: { delivered_quantity: true }
+      });
+      const previousQuantity = Number(previous._sum.delivered_quantity || 0);
+      const totalQuantity = previousQuantity + linkedLine.requested;
+      const limit = Number(linkedLine.limit);
+      if (totalQuantity > limit) {
+        const excess = totalQuantity - limit;
+        throw new ValidationError(`Delivery ${linkedLine.type} line ${linkedLine.id} exceeds ${linkedLine.quantityField} ${limit}: previously dispatched ${previousQuantity}, current requested ${linkedLine.requested}, excess ${excess}`);
+      }
     }
 
     const stockBalances = new Map();
