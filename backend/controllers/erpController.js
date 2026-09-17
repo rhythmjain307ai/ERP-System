@@ -3,7 +3,7 @@ const { ApiError, NotFoundError, ValidationError } = require('../lib/errors');
 
 async function lockStockBalance(tx, inventoryItemId, warehouseId, lotId) {
   const key = `${inventoryItemId}:${warehouseId}:${lotId || 'null'}`;
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+  await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtextextended(${key}, 0::bigint))`;
   const rows = await tx.$queryRaw`SELECT "inventory_stock_id", "quantity", "reserved_quantity" FROM "public"."inventory_stock" WHERE "inventory_item_id" = ${inventoryItemId} AND "warehouse_id" = ${warehouseId} AND "lot_id" IS NOT DISTINCT FROM ${lotId} FOR UPDATE`;
   return rows[0] || null;
 }
@@ -169,8 +169,6 @@ async function postGrn(req, res) {
         }
       }
 
-      const stockLockKey = `${line.inventory_item_id}:${grn.warehouse_id}:${lotId === null ? 'null' : lotId}`;
-      await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtextextended(${stockLockKey}, 0))`;
       const stock = await lockStockBalance(tx, line.inventory_item_id, grn.warehouse_id, lotId);
       if (stock) await tx.inventory_stock.update({ where: { inventory_stock_id: stock.inventory_stock_id }, data: { quantity: { increment: acceptedQuantity }, last_updated_at: new Date() } });
       else await tx.inventory_stock.create({ data: { inventory_item_id: line.inventory_item_id, warehouse_id: grn.warehouse_id, lot_id: lotId, quantity: acceptedQuantity } });
@@ -252,7 +250,7 @@ async function dispatchDelivery(req, res) {
 
     for (const linkedLine of [...linkedLines.values()].sort((left, right) => `${left.type}:${left.id}`.localeCompare(`${right.type}:${right.id}`))) {
       const lockKey = `delivery-limit:${linkedLine.type}:${linkedLine.id}`;
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
+      await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtextextended(${lockKey}, 0::bigint))`;
       const previous = await tx.delivery_item.aggregate({
         where: {
           [linkedLine.type === 'customer order' ? 'customer_order_item_id' : 'sales_invoice_item_id']: linkedLine.id,
