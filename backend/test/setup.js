@@ -34,6 +34,7 @@ async function setupIntegration() {
     grnIds: [],
     orderIds: [],
     invoiceIds: [],
+    deliveryIds: [],
     approvalTransactionIds: []
   };
 
@@ -53,6 +54,7 @@ async function setupIntegration() {
       await prisma.$transaction([
         prisma.approval_action.deleteMany({ where: { transaction_type: 'TEST', transaction_id: { in: transactionIds } } }),
         prisma.approval_request.deleteMany({ where: { approval_workflow_id: workflow.approval_workflow_id } }),
+        prisma.delivery.deleteMany({ where: { delivery_id: { in: created.deliveryIds } } }),
         prisma.sales_invoice.deleteMany({ where: { sales_invoice_id: { in: created.invoiceIds } } }),
         prisma.customer_order.deleteMany({ where: { customer_order_id: { in: created.orderIds } } }),
         prisma.stock_movement.deleteMany({ where: { inventory_item_id: { in: [inventoryItem.inventory_item_id, lotInventoryItem.inventory_item_id] }, warehouse_id: warehouse.warehouse_id } }),
