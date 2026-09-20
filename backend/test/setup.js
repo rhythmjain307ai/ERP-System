@@ -32,6 +32,7 @@ async function setupIntegration() {
   const created = {
     requisitionIds: [],
     purchaseOrderIds: [],
+    vendorInvoiceIds: [],
     grnIds: [],
     orderIds: [],
     invoiceIds: [],
@@ -70,6 +71,7 @@ async function setupIntegration() {
         prisma.inventory_lot.deleteMany({ where: { inventory_item_id: { in: created.productionItemIds } } }),
         prisma.approval_request.deleteMany({ where: { approval_workflow_id: workflow.approval_workflow_id } }),
         prisma.delivery.deleteMany({ where: { delivery_id: { in: created.deliveryIds } } }),
+        prisma.vendor_invoice.deleteMany({ where: { vendor_id: { in: [vendor.vendor_id, otherVendor.vendor_id] } } }),
         prisma.sales_invoice.deleteMany({ where: { sales_invoice_id: { in: created.invoiceIds } } }),
         prisma.customer_order.deleteMany({ where: { customer_order_id: { in: created.orderIds } } }),
         prisma.stock_movement.deleteMany({ where: { inventory_item_id: { in: [inventoryItem.inventory_item_id, lotInventoryItem.inventory_item_id] }, warehouse_id: warehouse.warehouse_id } }),

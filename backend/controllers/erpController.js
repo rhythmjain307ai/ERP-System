@@ -448,6 +448,152 @@ async function createSalesInvoice(req, res) {
   }, (parent, item) => ({ sales_invoice_id: parent.sales_invoice_id, customer_order_item_id: item.customer_order_item_id === undefined ? undefined : id(item.customer_order_item_id, 'customer_order_item_id'), inventory_item_id: item.inventory_item_id === undefined ? undefined : id(item.inventory_item_id, 'inventory_item_id'), description: item.description || '', hsn_sac_code: item.hsn_sac_code, uom: item.uom, quantity: item.quantity === undefined ? undefined : number(item.quantity, 'quantity'), unit_price: item.unit_price === undefined ? undefined : number(item.unit_price, 'unit_price'), discount_amount: item.discount_amount === undefined ? undefined : number(item.discount_amount, 'discount_amount'), taxable_amount: item.taxable_amount === undefined ? undefined : number(item.taxable_amount, 'taxable_amount'), gst_rate: item.gst_rate === undefined ? undefined : number(item.gst_rate, 'gst_rate'), line_total: item.line_total === undefined ? undefined : number(item.line_total, 'line_total') }));
 }
 
+async function createVendorInvoice(req, res) {
+  required(req.body, ['vendor_id', 'invoice_number', 'invoice_date', 'due_date']);
+  itemsRequired(req.body);
+  if (req.body.invoice_number.length < 1 || req.body.invoice_number.length > 100) throw new ValidationError('invoice_number must be between 1 and 100 characters');
+  const gstinPattern = /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+  for (const field of ['supplier_gstin', 'recipient_gstin']) {
+    if (req.body[field] !== undefined && req.body[field] !== null && !gstinPattern.test(req.body[field])) throw new ValidationError(`${field} must be a valid GSTIN`);
+  }
+  const vendorId = id(req.body.vendor_id, 'vendor_id');
+  const purchaseOrderId = req.body.purchase_order_id === undefined || req.body.purchase_order_id === null ? undefined : id(req.body.purchase_order_id, 'purchase_order_id');
+  const invoiceDate = date(req.body.invoice_date);
+  const dueDate = date(req.body.due_date);
+  if (Number.isNaN(invoiceDate.getTime())) throw new ValidationError('invoice_date must be a valid date');
+  if (Number.isNaN(dueDate.getTime())) throw new ValidationError('due_date must be a valid date');
+  if (dueDate < invoiceDate) throw new ValidationError('Due date cannot be earlier than invoice date');
+
+  const result = await prisma.$transaction(async (tx) => {
+    const vendor = await tx.vendor.findUnique({ where: { vendor_id: vendorId }, select: { is_active: true } });
+    if (!vendor) throw new ValidationError('vendor does not exist');
+    if (!vendor.is_active) throw new ValidationError('vendor is inactive');
+
+    let purchaseOrder;
+    if (purchaseOrderId !== undefined) {
+      purchaseOrder = await tx.purchase_order.findUnique({ where: { purchase_order_id: purchaseOrderId }, select: { vendor_id: true, status: true } });
+      if (!purchaseOrder) throw new ValidationError('purchase order does not exist');
+      if (purchaseOrder.vendor_id !== vendorId) throw new ValidationError('purchase order vendor must match invoice vendor');
+      if (!['SENT', 'PARTIALLY_RECEIVED', 'RECEIVED'].includes(purchaseOrder.status)) throw new ValidationError('Purchase order status must be SENT, PARTIALLY_RECEIVED, or RECEIVED');
+    }
+
+    const preparedItems = [];
+    const requestedByPoItem = new Map();
+    const roundMoney = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
+    let taxableAmount = 0;
+    let discountAmount = 0;
+    let cgstAmount = 0;
+    let sgstAmount = 0;
+    let igstAmount = 0;
+    let totalAmount = 0;
+
+    for (const [index, item] of req.body.items.entries()) {
+      const inventoryItemId = id(item.inventory_item_id, `items[${index}].inventory_item_id`);
+      const inventoryItem = await tx.inventory_item.findUnique({ where: { inventory_item_id: inventoryItemId }, select: { inventory_item_id: true } });
+      if (!inventoryItem) throw new ValidationError(`items[${index}] inventory item does not exist`);
+      const quantity = number(item.quantity, `items[${index}].quantity`);
+      if (quantity <= 0) throw new ValidationError(`items[${index}].quantity must be greater than zero`);
+      let purchaseOrderItem;
+      if (item.purchase_order_item_id !== undefined && item.purchase_order_item_id !== null) {
+        if (purchaseOrderId === undefined) throw new ValidationError('purchase_order_id is required when purchase_order_item_id is supplied');
+        const purchaseOrderItemId = id(item.purchase_order_item_id, `items[${index}].purchase_order_item_id`);
+        purchaseOrderItem = await tx.purchase_order_item.findUnique({ where: { purchase_order_item_id: purchaseOrderItemId } });
+        if (!purchaseOrderItem) throw new ValidationError('purchase order item does not exist');
+        if (purchaseOrderItem.purchase_order_id !== purchaseOrderId) throw new ValidationError('purchase order item does not belong to the supplied purchase order');
+        if (purchaseOrderItem.inventory_item_id !== inventoryItemId) throw new ValidationError('Invoice inventory item does not match purchase order item');
+        if (purchaseOrderItem.uom !== item.uom) throw new ValidationError('Invoice UOM does not match purchase order item');
+        requestedByPoItem.set(purchaseOrderItemId.toString(), (requestedByPoItem.get(purchaseOrderItemId.toString()) || 0) + quantity);
+      }
+      const rate = item.rate ?? item.unit_price ?? 0;
+      const unitPrice = number(rate, `items[${index}].rate`);
+      if (unitPrice < 0) throw new ValidationError(`items[${index}].rate must be greater than or equal to zero`);
+      if (purchaseOrderItem && unitPrice !== Number(purchaseOrderItem.unit_rate)) throw new ValidationError('Invoice rate does not match purchase order rate');
+      const discount = item.discount_amount === undefined ? 0 : number(item.discount_amount, `items[${index}].discount_amount`);
+      const gstRate = item.gst_rate === undefined ? 0 : number(item.gst_rate, `items[${index}].gst_rate`);
+      if (discount < 0) throw new ValidationError(`items[${index}].discount_amount must be greater than or equal to zero`);
+      if (gstRate < 0) throw new ValidationError(`items[${index}].gst_rate must be greater than or equal to zero`);
+      const lineTaxableAmount = roundMoney(Math.max(0, quantity * unitPrice - discount));
+      const lineTaxAmount = roundMoney(lineTaxableAmount * gstRate / 100);
+      const lineCgstAmount = roundMoney(lineTaxAmount / 2);
+      const lineSgstAmount = roundMoney(lineTaxAmount - lineCgstAmount);
+      const lineTotal = roundMoney(lineTaxableAmount + lineTaxAmount);
+      preparedItems.push({
+        index,
+        inventoryItemId,
+        purchaseOrderItem,
+        purchaseOrderItemId: purchaseOrderItem?.purchase_order_item_id,
+        quantity,
+        unitPrice,
+        description: item.description || '',
+        hsnSacCode: item.hsn_sac_code,
+        uom: item.uom,
+        discount,
+        gstRate,
+        lineTaxableAmount,
+        lineCgstAmount,
+        lineSgstAmount,
+        lineTotal
+      });
+      taxableAmount += lineTaxableAmount;
+      discountAmount += discount;
+      cgstAmount += lineCgstAmount;
+      sgstAmount += lineSgstAmount;
+      totalAmount += lineTotal;
+    }
+
+    for (const [purchaseOrderItemId, requestedQuantity] of requestedByPoItem) {
+      const alreadyInvoiced = await tx.vendor_invoice_item.aggregate({ where: { purchase_order_item_id: BigInt(purchaseOrderItemId) }, _sum: { quantity: true } });
+      const orderedQuantity = Number(preparedItems.find((item) => item.purchaseOrderItemId.toString() === purchaseOrderItemId).purchaseOrderItem.ordered_quantity);
+      if (Number(alreadyInvoiced._sum.quantity || 0) + requestedQuantity > orderedQuantity) throw new ValidationError('Invoice quantity exceeds purchase order quantity');
+    }
+
+    const invoice = await tx.vendor_invoice.create({ data: {
+      vendor_id: vendorId,
+      purchase_order_id: purchaseOrderId,
+      invoice_number: req.body.invoice_number,
+      invoice_date: invoiceDate,
+      due_date: dueDate,
+      payment_terms: req.body.payment_terms,
+      place_of_supply: req.body.place_of_supply,
+      supplier_gstin: req.body.supplier_gstin,
+      recipient_gstin: req.body.recipient_gstin,
+      supplier_reference: req.body.supplier_reference,
+      taxable_amount: roundMoney(taxableAmount),
+      cgst_amount: roundMoney(cgstAmount),
+      sgst_amount: roundMoney(sgstAmount),
+      igst_amount: roundMoney(igstAmount),
+      cess_amount: 0,
+      discount_amount: roundMoney(discountAmount),
+      other_charges: 0,
+      round_off: 0,
+      total_amount: roundMoney(totalAmount),
+      status: 'DRAFT'
+    } });
+
+    for (const item of preparedItems) {
+      await tx.vendor_invoice_item.create({ data: {
+        vendor_invoice_id: invoice.vendor_invoice_id,
+        purchase_order_item_id: item.purchaseOrderItemId,
+        inventory_item_id: item.inventoryItemId,
+        description: item.description,
+        hsn_sac_code: item.hsnSacCode,
+        uom: item.uom,
+        quantity: item.quantity,
+        unit_price: item.unitPrice,
+        discount_amount: item.discount,
+        taxable_amount: item.lineTaxableAmount,
+        gst_rate: item.gstRate,
+        cgst_amount: item.lineCgstAmount,
+        sgst_amount: item.lineSgstAmount,
+        igst_amount: 0,
+        line_total: item.lineTotal
+      } });
+    }
+    return tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoice.vendor_invoice_id }, include: { vendor_invoice_item: true } });
+  });
+  res.status(201).json({ success: true, data: result });
+}
+
 async function createDocument(req, res) {
   required(req.body, ['document_type', 'file_name']);
   const result = await prisma.$transaction(async (tx) => {
@@ -496,4 +642,4 @@ async function submitApprovalAction(req, res) {
   res.status(201).json({ success: true, data: action });
 }
 
-module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createDocument, getDocument, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
+module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createVendorInvoice, createDocument, getDocument, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };

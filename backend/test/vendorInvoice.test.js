@@ -1,0 +1,284 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const request = require('supertest');
+const setupIntegration = require('./setup');
+const app = require('../app');
+const prisma = require('../lib/prisma');
+
+const integration = Boolean(process.env.TEST_DATABASE_URL);
+let context;
+
+function invoiceBody(overrides = {}) {
+  return {
+    vendor_id: context.vendorId,
+    invoice_number: `VINV-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+    invoice_date: '2026-01-15',
+    due_date: '2026-02-15',
+    items: [{ inventory_item_id: context.inventoryItemId, description: 'Test material', uom: 'EA', quantity: 2, rate: 12.5 }],
+    ...overrides
+  };
+}
+
+async function createPurchaseOrder({ vendorId = context.vendorId, status = 'SENT', quantity = 2, rate = 12.5, inventoryItemId = context.inventoryItemId, uom = 'EA' } = {}) {
+  const response = await request(app).post('/api/procurement/purchase-orders').set('Authorization', context.auth).send({
+    po_number: `PO-VINV-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+    vendor_id: vendorId,
+    status,
+    items: [{ inventory_item_id: inventoryItemId, uom, ordered_quantity: quantity, unit_rate: rate }]
+  });
+  assert.equal(response.status, 201);
+  const purchaseOrderId = BigInt(response.body.data.purchase_order_id);
+  const purchaseOrderItemId = BigInt(response.body.data.purchase_order_item[0].purchase_order_item_id);
+  context.created.purchaseOrderIds.push(purchaseOrderId);
+  return { purchaseOrderId: purchaseOrderId.toString(), purchaseOrderItemId: purchaseOrderItemId.toString() };
+}
+
+async function postInvoice(body) {
+  return request(app).post('/api/procurement/vendor-invoices').set('Authorization', context.auth).send(body);
+}
+
+test.before(async () => {
+  context = await setupIntegration();
+});
+
+test.after(async () => {
+  if (context) await context.cleanup();
+  await prisma.$disconnect();
+});
+
+test('creates a vendor invoice with items', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody());
+  assert.equal(response.status, 201);
+  assert.equal(response.body.data.vendor_invoice_item.length, 1);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  const item = await prisma.vendor_invoice_item.findFirst({ where: { vendor_invoice_id: invoiceId } });
+  assert.equal(Number(item.quantity), 2);
+  context.created.vendorInvoiceIds.push(invoiceId);
+});
+
+test('requires a vendor', { skip: !integration }, async () => {
+  const body = invoiceBody();
+  delete body.vendor_id;
+  assert.equal((await postInvoice(body)).status, 400);
+});
+
+test('rejects an inactive vendor', { skip: !integration }, async () => {
+  await prisma.vendor.update({ where: { vendor_id: BigInt(context.vendorId) }, data: { is_active: false } });
+  const response = await postInvoice(invoiceBody());
+  await prisma.vendor.update({ where: { vendor_id: BigInt(context.vendorId) }, data: { is_active: true } });
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /inactive/);
+});
+
+test('requires an invoice number', { skip: !integration }, async () => {
+  const body = invoiceBody();
+  delete body.invoice_number;
+  assert.equal((await postInvoice(body)).status, 400);
+});
+
+test('requires an invoice date', { skip: !integration }, async () => {
+  const body = invoiceBody();
+  delete body.invoice_date;
+  assert.equal((await postInvoice(body)).status, 400);
+});
+
+test('requires a due date', { skip: !integration }, async () => {
+  const body = invoiceBody();
+  delete body.due_date;
+  assert.equal((await postInvoice(body)).status, 400);
+});
+
+test('requires at least one item', { skip: !integration }, async () => {
+  assert.equal((await postInvoice(invoiceBody({ items: [] }))).status, 400);
+});
+
+test('rejects an invalid quantity', { skip: !integration }, async () => {
+  assert.equal((await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 0, rate: 1 }] }))).status, 400);
+});
+
+test('rejects an invalid rate', { skip: !integration }, async () => {
+  assert.equal((await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: -1 }] }))).status, 400);
+});
+
+test('rejects an invalid vendor', { skip: !integration }, async () => {
+  assert.equal((await postInvoice(invoiceBody({ vendor_id: '999999999' }))).status, 400);
+});
+
+test('rejects an invalid purchase order', { skip: !integration }, async () => {
+  assert.equal((await postInvoice(invoiceBody({ purchase_order_id: '999999999' }))).status, 400);
+});
+
+test('rejects a purchase order for another vendor', { skip: !integration }, async () => {
+  const { purchaseOrderId } = await createPurchaseOrder({ vendorId: context.otherVendorId });
+  const response = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrderId }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /vendor must match/);
+});
+
+test('rolls back the invoice when an item insert fails', { skip: !integration }, async () => {
+  const body = invoiceBody({ items: [
+    { inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 1 },
+    { inventory_item_id: '999999999', uom: 'EA', quantity: 1, rate: 1 }
+  ] });
+  const response = await postInvoice(body);
+  assert.equal(response.status, 400);
+  assert.equal(await prisma.vendor_invoice.count({ where: { invoice_number: body.invoice_number } }), 0);
+  assert.equal(await prisma.vendor_invoice_item.count({ where: { vendor_invoice: { invoice_number: body.invoice_number } } }), 0);
+});
+
+test('defaults status to DRAFT', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody());
+  assert.equal(response.status, 201);
+  assert.equal(response.body.data.status, 'DRAFT');
+  context.created.vendorInvoiceIds.push(BigInt(response.body.data.vendor_invoice_id));
+});
+
+test('does not create an accounts payable record', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody());
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  context.created.vendorInvoiceIds.push(invoiceId);
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 0);
+});
+
+test('creates a valid invoice linked to a PO item', { skip: !integration }, async () => {
+  const { purchaseOrderId, purchaseOrderItemId } = await createPurchaseOrder();
+  const response = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrderId, items: [{ inventory_item_id: context.inventoryItemId, purchase_order_item_id: purchaseOrderItemId, description: 'PO material', uom: 'EA', quantity: 2, rate: 12.5 }] }));
+  assert.equal(response.status, 201);
+  context.created.vendorInvoiceIds.push(BigInt(response.body.data.vendor_invoice_id));
+});
+
+test('creates a valid invoice without a PO', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody());
+  assert.equal(response.status, 201);
+  context.created.vendorInvoiceIds.push(BigInt(response.body.data.vendor_invoice_id));
+});
+
+test('rejects a due date before the invoice date', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ invoice_date: '2026-02-15', due_date: '2026-02-14' }));
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error.message, 'Due date cannot be earlier than invoice date');
+});
+
+test('rejects an invalid GSTIN', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ supplier_gstin: 'INVALID-GSTIN' }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /valid GSTIN/);
+});
+
+test('rejects a PO in DRAFT status', { skip: !integration }, async () => {
+  const { purchaseOrderId } = await createPurchaseOrder({ status: 'DRAFT' });
+  const response = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrderId }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /Purchase order status/);
+});
+
+test('rejects a CLOSED PO', { skip: !integration }, async () => {
+  const { purchaseOrderId } = await createPurchaseOrder({ status: 'CLOSED' });
+  const response = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrderId }));
+  assert.equal(response.status, 400);
+});
+
+test('rejects a CANCELLED PO', { skip: !integration }, async () => {
+  const { purchaseOrderId } = await createPurchaseOrder({ status: 'CANCELLED' });
+  const response = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrderId }));
+  assert.equal(response.status, 400);
+});
+
+test('rejects a nonexistent PO item', { skip: !integration }, async () => {
+  const purchaseOrder = await createPurchaseOrder();
+  const response = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrder.purchaseOrderId, items: [{ inventory_item_id: context.inventoryItemId, purchase_order_item_id: '999999999', uom: 'EA', quantity: 1, rate: 12.5 }] }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /purchase order item does not exist/);
+});
+
+test('rejects a PO item belonging to another PO', { skip: !integration }, async () => {
+  const first = await createPurchaseOrder();
+  const second = await createPurchaseOrder();
+  const response = await postInvoice(invoiceBody({ purchase_order_id: first.purchaseOrderId, items: [{ inventory_item_id: context.inventoryItemId, purchase_order_item_id: second.purchaseOrderItemId, uom: 'EA', quantity: 1, rate: 12.5 }] }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /does not belong/);
+});
+
+test('rejects an inventory item mismatch', { skip: !integration }, async () => {
+  const purchaseOrder = await createPurchaseOrder({ inventoryItemId: context.lotInventoryItemId });
+  const response = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrder.purchaseOrderId, items: [{ inventory_item_id: context.inventoryItemId, purchase_order_item_id: purchaseOrder.purchaseOrderItemId, uom: 'EA', quantity: 1, rate: 12.5 }] }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /inventory item/);
+});
+
+test('rejects a UOM mismatch', { skip: !integration }, async () => {
+  const purchaseOrder = await createPurchaseOrder();
+  const response = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrder.purchaseOrderId, items: [{ inventory_item_id: context.inventoryItemId, purchase_order_item_id: purchaseOrder.purchaseOrderItemId, uom: 'KG', quantity: 1, rate: 12.5 }] }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /UOM/);
+});
+
+test('rejects an invoice quantity above the PO quantity', { skip: !integration }, async () => {
+  const purchaseOrder = await createPurchaseOrder({ quantity: 2 });
+  const response = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrder.purchaseOrderId, items: [{ inventory_item_id: context.inventoryItemId, purchase_order_item_id: purchaseOrder.purchaseOrderItemId, uom: 'EA', quantity: 3, rate: 12.5 }] }));
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error.message, 'Invoice quantity exceeds purchase order quantity');
+});
+
+test('rejects multiple invoices that exceed the PO quantity', { skip: !integration }, async () => {
+  const purchaseOrder = await createPurchaseOrder({ quantity: 3 });
+  const item = { inventory_item_id: context.inventoryItemId, purchase_order_item_id: purchaseOrder.purchaseOrderItemId, uom: 'EA', quantity: 2, rate: 12.5 };
+  const first = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrder.purchaseOrderId, items: [item] }));
+  assert.equal(first.status, 201);
+  context.created.vendorInvoiceIds.push(BigInt(first.body.data.vendor_invoice_id));
+  const second = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrder.purchaseOrderId, items: [item] }));
+  assert.equal(second.status, 400);
+  assert.equal(second.body.error.message, 'Invoice quantity exceeds purchase order quantity');
+});
+
+test('rejects an invoice rate different from the PO rate', { skip: !integration }, async () => {
+  const purchaseOrder = await createPurchaseOrder({ rate: 12.5 });
+  const response = await postInvoice(invoiceBody({ purchase_order_id: purchaseOrder.purchaseOrderId, items: [{ inventory_item_id: context.inventoryItemId, purchase_order_item_id: purchaseOrder.purchaseOrderItemId, uom: 'EA', quantity: 1, rate: 13 }] }));
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error.message, 'Invoice rate does not match purchase order rate');
+});
+
+test('recalculates invoice totals on the server', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 12.5, discount_amount: 1, gst_rate: 18 }] }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId }, include: { vendor_invoice_item: true } });
+  assert.equal(Number(invoice.taxable_amount), 24);
+  assert.equal(Number(invoice.cgst_amount), 2.16);
+  assert.equal(Number(invoice.sgst_amount), 2.16);
+  assert.equal(Number(invoice.total_amount), 28.32);
+  assert.equal(Number(invoice.vendor_invoice_item[0].taxable_amount), 24);
+  assert.equal(Number(invoice.vendor_invoice_item[0].line_total), 28.32);
+  context.created.vendorInvoiceIds.push(invoiceId);
+});
+
+test('ignores incorrect client-supplied totals', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ taxable_amount: 999, total_amount: 9999, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 12.5, taxable_amount: 888, line_total: 777, cgst_amount: 666, sgst_amount: 555, gst_rate: 0 }] }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId }, include: { vendor_invoice_item: true } });
+  assert.equal(Number(invoice.taxable_amount), 25);
+  assert.equal(Number(invoice.total_amount), 25);
+  assert.equal(Number(invoice.vendor_invoice_item[0].taxable_amount), 25);
+  assert.equal(Number(invoice.vendor_invoice_item[0].line_total), 25);
+  context.created.vendorInvoiceIds.push(invoiceId);
+});
+
+test('keeps status DRAFT after validation enhancements', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody());
+  assert.equal(response.status, 201);
+  assert.equal(response.body.data.status, 'DRAFT');
+  context.created.vendorInvoiceIds.push(BigInt(response.body.data.vendor_invoice_id));
+});
+
+test('still rolls back after PO validation and calculated item preparation', { skip: !integration }, async () => {
+  const purchaseOrder = await createPurchaseOrder();
+  const body = invoiceBody({ purchase_order_id: purchaseOrder.purchaseOrderId, items: [
+    { inventory_item_id: context.inventoryItemId, purchase_order_item_id: purchaseOrder.purchaseOrderItemId, uom: 'EA', quantity: 1, rate: 12.5 },
+    { inventory_item_id: '999999999', uom: 'EA', quantity: 1, rate: 12.5 }
+  ] });
+  const response = await postInvoice(body);
+  assert.equal(response.status, 400);
+  assert.equal(await prisma.vendor_invoice.count({ where: { invoice_number: body.invoice_number } }), 0);
+});
