@@ -212,6 +212,58 @@ const documentUi = {
 function authToken() { return localStorage.getItem('erpAuthToken') || window.ERP_AUTH_TOKEN || ''; }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]); }
 function currency(value) { return value === null || value === undefined ? '—' : new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(Number(value)); }
+function normalizeExtractionFields(rawFields = {}) {
+  const source = rawFields || {};
+  const amounts = source.amounts || {};
+  const vendor = source.vendor || {};
+  const items = Array.isArray(source.items) ? source.items : [];
+  const invoiceNumber = source.invoiceNumber ?? source.invoice_number ?? null;
+  const invoiceDate = source.invoiceDate ?? source.invoice_date ?? null;
+  const vendorName = vendor.name ?? source.vendor_name ?? source.vendorName ?? null;
+  const vendorGstin = vendor.gstin ?? source.vendor_gstin ?? source.vendorGstin ?? null;
+  const total = amounts.total ?? source.total ?? null;
+  const taxableAmount = amounts.taxableAmount ?? amounts.subtotal ?? source.taxable_amount ?? source.subtotal ?? null;
+  const subtotal = amounts.subtotal ?? source.subtotal ?? taxableAmount ?? null;
+  const cgst = amounts.cgst ?? source.cgst ?? null;
+  const sgst = amounts.sgst ?? source.sgst ?? null;
+  const igst = amounts.igst ?? source.igst ?? null;
+  const discount = amounts.discount ?? source.discount ?? 0;
+  const roundOff = amounts.roundOff ?? source.round_off ?? 0;
+  return {
+    invoiceNumber,
+    invoice_number: invoiceNumber,
+    invoiceDate,
+    invoice_date: invoiceDate,
+    vendor: { ...vendor, name: vendorName, gstin: vendorGstin },
+    vendor_name: vendorName,
+    vendorGstin: vendorGstin,
+    vendor_gstin: vendorGstin,
+    amounts: {
+      ...amounts,
+      subtotal,
+      taxableAmount,
+      cgst,
+      sgst,
+      igst,
+      discount,
+      roundOff,
+      total
+    },
+    items: items.map((item) => ({
+      ...item,
+      description: item.description || item.name || 'Line item',
+      quantity: item.quantity ?? item.qty ?? null,
+      unitPrice: item.unitPrice ?? item.unit_price ?? null,
+      unit_price: item.unitPrice ?? item.unit_price ?? null,
+      lineTotal: item.lineTotal ?? item.line_total ?? null,
+      line_total: item.lineTotal ?? item.line_total ?? null,
+      taxableAmount: item.taxableAmount ?? item.taxable_amount ?? item.unitPrice ?? item.unit_price ?? null,
+      taxable_amount: item.taxableAmount ?? item.taxable_amount ?? item.unitPrice ?? item.unit_price ?? null,
+      gstRate: item.gstRate ?? item.gst_rate ?? null,
+      gst_rate: item.gstRate ?? item.gst_rate ?? null
+    }))
+  };
+}
 function documentApi(path, options = {}) {
   const token = authToken();
   return fetch(`/api/documents${path}`, { ...options, headers: { ...(options.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) } }).then(async response => {
@@ -227,10 +279,28 @@ function showDocumentAuth() {
 }
 function documentSummary(document) {
   const review = document.invoice_extraction_review || {};
-  const fields = review.extracted_fields || {};
+  const fields = normalizeExtractionFields(review.extracted_fields || {});
   const status = review.extraction_status || 'PENDING';
   const confidence = review.confidence_score === null || review.confidence_score === undefined ? '—' : `${Math.round(Number(review.confidence_score) * 100)}%`;
-  return `<button class="document-row" type="button" data-document-id="${document.document_id}"><span class="doc-badge">${escapeHtml(document.document_type.slice(0, 3))}</span><span><strong>${escapeHtml(fields.invoiceNumber || document.metadata?.originalFileName || 'Unnumbered document')}</strong><small>${escapeHtml(fields.vendor?.name || 'Vendor needs review')} · ${currency(fields.amounts?.total)}</small></span><span class="document-status ${status.toLowerCase()}">${escapeHtml(status.replace('_', ' '))}<small>${confidence}</small></span></button>`;
+  const invoiceNumber = fields.invoiceNumber || document.metadata?.originalFileName || 'Unnumbered document';
+  const vendorName = fields.vendor?.name || 'Vendor needs review';
+  const total = fields.amounts?.total ?? null;
+  return `<button class="document-row" type="button" data-document-id="${document.document_id}"><span class="doc-badge">${escapeHtml(document.document_type.slice(0, 3))}</span><span><strong>${escapeHtml(invoiceNumber)}</strong><small>${escapeHtml(vendorName)} · ${currency(total)}</small></span><span class="document-status ${status.toLowerCase()}">${escapeHtml(status.replace('_', ' '))}<small>${confidence}</small></span></button>`;
+}
+function renderDocumentValue(value, emptyText = 'Not detected') {
+  if (value === null || value === undefined || value === '') return emptyText;
+  return value;
+}
+function renderInvoiceLineItems(items) {
+  if (!Array.isArray(items) || items.length === 0) return '<p class="empty-copy">No extracted line items are available yet.</p>';
+  return `
+    <table class="line-items-table">
+      <thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Taxable</th><th>Total</th></tr></thead>
+      <tbody>
+        ${items.map(item => `<tr><td>${escapeHtml(item.description || 'Item')}</td><td>${escapeHtml(item.quantity ?? '—')}</td><td>${escapeHtml(item.unit || '—')}</td><td>${currency(item.taxableAmount ?? item.taxable_amount ?? null)}</td><td>${currency(item.lineTotal ?? item.line_total ?? null)}</td></tr>`).join('')}
+      </tbody>
+    </table>
+  `;
 }
 async function loadDocuments() {
   if (!authToken()) { showDocumentAuth(); return; }
@@ -253,12 +323,43 @@ async function openDocument(id) {
     const response = await documentApi(`/${id}`);
     const documentRecord = response.data;
     const review = documentRecord.invoice_extraction_review || {};
-    const fields = review.extracted_fields || { vendor: {}, amounts: {}, items: [] };
+    const fields = normalizeExtractionFields(review.extracted_fields || { vendor: {}, amounts: {}, items: [] });
     const validation = Array.isArray(review.validation_errors) ? review.validation_errors : [];
     const preview = await documentApi(`/${id}/file`);
     const previewUrl = URL.createObjectURL(preview);
     const previewMarkup = documentRecord.mime_type === 'application/pdf' ? `<embed src="${previewUrl}" type="application/pdf" class="document-preview">` : `<img src="${previewUrl}" class="document-preview" alt="Original uploaded document">`;
-    documentUi.detail.innerHTML = `<div class="detail-head"><h3>Original & extraction</h3><button id="closeDocumentDetail" class="mini-btn" type="button">Close</button></div><div class="document-split"><div>${previewMarkup}</div><form id="documentReviewForm" class="document-form"><p class="eyebrow">${escapeHtml(review.extraction_status || 'PENDING')}</p>${validation.length ? `<div class="validation-warning"><strong>Needs attention</strong><ul>${validation.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div>` : ''}<label>Invoice number<input name="invoiceNumber" value="${escapeHtml(fields.invoiceNumber || '')}"></label><label>Invoice date<input name="invoiceDate" type="date" value="${escapeHtml(fields.invoiceDate || '')}"></label><label>Vendor<input name="vendorName" value="${escapeHtml(fields.vendor?.name || '')}"></label><label>GSTIN<input name="vendorGstin" value="${escapeHtml(fields.vendor?.gstin || '')}"></label><label>Subtotal<input name="subtotal" type="number" step="0.01" value="${escapeHtml(fields.amounts?.subtotal ?? '')}"></label><label>CGST<input name="cgst" type="number" step="0.01" value="${escapeHtml(fields.amounts?.cgst ?? '')}"></label><label>SGST<input name="sgst" type="number" step="0.01" value="${escapeHtml(fields.amounts?.sgst ?? '')}"></label><label>IGST<input name="igst" type="number" step="0.01" value="${escapeHtml(fields.amounts?.igst ?? '')}"></label><label>Total<input name="total" type="number" step="0.01" value="${escapeHtml(fields.amounts?.total ?? '')}"></label><label>Review notes<textarea name="notes">${escapeHtml(review.review_notes || '')}</textarea></label><div class="review-actions"><button class="mini-btn" name="action" value="SAVE" type="submit">Save edits</button><button class="mini-btn approve" name="action" value="APPROVED" type="submit">Approve</button><button class="mini-btn reject" name="action" value="REJECTED" type="submit">Reject</button></div></form></div>`;
+    const confidence = review.confidence_score === null || review.confidence_score === undefined ? '—' : `${Math.round(Number(review.confidence_score) * 100)}%`;
+    const lineItems = renderInvoiceLineItems(fields.items);
+    documentUi.detail.innerHTML = `
+      <div class="detail-head">
+        <h3>Original & extraction</h3>
+        <a class="mini-btn" href="/api/documents/${id}/file" target="_blank" rel="noopener">Open file</a>
+        <button id="closeDocumentDetail" class="mini-btn" type="button">Close</button>
+      </div>
+      <div class="document-split">
+        <div>${previewMarkup}</div>
+        <form id="documentReviewForm" class="document-form">
+          <div class="status-row">
+            <p class="eyebrow">${escapeHtml(review.extraction_status || 'PENDING')}</p>
+            <span class="confidence-pill">Confidence: ${escapeHtml(confidence)}</span>
+          </div>
+          ${validation.length ? `<div class="validation-warning"><strong>Needs attention</strong><ul>${validation.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div>` : ''}
+          <div class="field-grid">
+            <label>Invoice number<input name="invoiceNumber" value="${escapeHtml(fields.invoiceNumber || '')}"></label>
+            <label>Invoice date<input name="invoiceDate" type="date" value="${escapeHtml(fields.invoiceDate || '')}"></label>
+            <label>Vendor<input name="vendorName" value="${escapeHtml(fields.vendor?.name || '')}"></label>
+            <label>GSTIN<input name="vendorGstin" value="${escapeHtml(fields.vendor?.gstin || '')}"></label>
+            <label>Taxable amount<input name="subtotal" type="number" step="0.01" value="${escapeHtml(fields.amounts?.subtotal ?? '')}"></label>
+            <label>CGST<input name="cgst" type="number" step="0.01" value="${escapeHtml(fields.amounts?.cgst ?? '')}"></label>
+            <label>SGST<input name="sgst" type="number" step="0.01" value="${escapeHtml(fields.amounts?.sgst ?? '')}"></label>
+            <label>IGST<input name="igst" type="number" step="0.01" value="${escapeHtml(fields.amounts?.igst ?? '')}"></label>
+            <label>Total<input name="total" type="number" step="0.01" value="${escapeHtml(fields.amounts?.total ?? '')}"></label>
+          </div>
+          <div class="line-items-panel">${lineItems}</div>
+          <label>Review notes<textarea name="notes">${escapeHtml(review.review_notes || '')}</textarea></label>
+          <div class="review-actions"><button class="mini-btn" name="action" value="SAVE" type="submit">Save edits</button><button class="mini-btn approve" name="action" value="APPROVED" type="submit">Approve</button><button class="mini-btn reject" name="action" value="REJECTED" type="submit">Reject</button></div>
+        </form>
+      </div>`;
     document.getElementById('closeDocumentDetail').onclick = () => { URL.revokeObjectURL(previewUrl); documentUi.detail.hidden = true; };
     document.getElementById('documentReviewForm').onsubmit = event => saveDocumentReview(event, review.invoice_extraction_review_id, fields);
   } catch (error) { documentUi.detail.innerHTML = `<p class="empty-copy">${escapeHtml(error.message)}</p>`; }

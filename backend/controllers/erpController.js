@@ -514,7 +514,7 @@ async function uploadDocument(req, res) {
     if (duplicate) validation.status = 'NEEDS_REVIEW';
     const updatedReview = await prisma.invoice_extraction_review.update({
       where: { invoice_extraction_review_id: review.invoice_extraction_review_id },
-      data: { extraction_status: validation.status, extraction_engine: ocr.engine, extraction_version: ocr.version, raw_ocr_output: { text: ocr.text, confidence: ocr.confidence }, extracted_fields: extracted, confidence_score: validation.confidence, validation_errors: validation.errors, updated_at: new Date() }
+      data: { extraction_status: normalizeExtractionStatus(validation.status), extraction_engine: ocr.engine, extraction_version: ocr.version, raw_ocr_output: { text: ocr.text, confidence: ocr.confidence }, extracted_fields: extracted, confidence_score: validation.confidence, validation_errors: validation.errors, updated_at: new Date() }
     });
     res.status(201).json({ success: true, data: publicDocument({ ...document, invoice_extraction_review: updatedReview }) });
   } catch (error) {
@@ -522,10 +522,18 @@ async function uploadDocument(req, res) {
     console.error('OCR failure', { documentId: document.document_id.toString(), message: error.message });
     const updatedReview = await prisma.invoice_extraction_review.update({
       where: { invoice_extraction_review_id: review.invoice_extraction_review_id },
-      data: { extraction_status: error instanceof ValidationError ? 'NEEDS_REVIEW' : 'FAILED', validation_errors: [message], updated_at: new Date() }
+      data: { extraction_status: normalizeExtractionStatus(error instanceof ValidationError ? 'NEEDS_REVIEW' : 'FAILED'), validation_errors: [message], updated_at: new Date() }
     });
     res.status(201).json({ success: true, data: publicDocument({ ...document, invoice_extraction_review: updatedReview }) });
   }
+}
+
+function normalizeExtractionStatus(status) {
+  const value = String(status || '').toUpperCase();
+  if (value === 'PROCESSED') return 'EXTRACTED';
+  if (value === 'NEEDS_REVIEW') return 'UNDER_REVIEW';
+  if (value === 'FAILED') return 'VALIDATION_FAILED';
+  return value;
 }
 
 async function findLikelyDuplicate(documentId, extracted) {

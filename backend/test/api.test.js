@@ -2,8 +2,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const request = require('supertest');
 const setupIntegration = require('./setup');
-const app = require('../app');
 const prisma = require('../lib/prisma');
+let app = require('../app');
 
 const integration = Boolean(process.env.TEST_DATABASE_URL);
 let context;
@@ -31,6 +31,70 @@ test('returns 404 for unknown routes', async () => {
 test('requires authentication before accepting document uploads', async () => {
   const response = await request(app).post('/api/documents/upload').attach('file', Buffer.from([0xff, 0xd8, 0xff]), { filename: 'invoice.jpg', contentType: 'image/jpeg' });
   assert.equal(response.status, 401);
+});
+
+test('uploads an image invoice and returns document plus extraction review data', { skip: !integration }, async () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const invoiceNumber = `INV-${Date.now()}`;
+  const ocrService = require('../lib/ocr/ocrService');
+  const originalExtractText = ocrService.extractText;
+  ocrService.extractText = async () => ({
+    text: `Supplier: Bharat Steel Industries\nInvoice No: ${invoiceNumber}\nInvoice Date: 21/09/2026\nGSTIN: 27AAECA1234F1Z5\nSteel bar HSN: 7214 1 KG 1000.00 1000.00\nTaxable Amount: 1000.00\nCGST: 90.00\nSGST: 90.00\nGrand Total: 1180.00`,
+    confidence: 96,
+    engine: 'tesseract-test',
+    version: 'test-1'
+  });
+  delete require.cache[require.resolve('../controllers/erpController')];
+  delete require.cache[require.resolve('../routes/moduleRoutes')];
+  delete require.cache[require.resolve('../app')];
+  const appWithStubbedOcr = require('../app');
+
+  try {
+    const response = await request(appWithStubbedOcr).post('/api/documents/upload').set('Authorization', context.auth).attach('file', png, { filename: 'invoice.png', contentType: 'image/png' });
+    assert.equal(response.status, 201);
+    assert.equal(response.body.success, true);
+    assert.ok(response.body.data.document_id);
+    assert.ok(response.body.data.invoice_extraction_review);
+    assert.equal(response.body.data.invoice_extraction_review.extraction_status, 'EXTRACTED');
+    assert.equal(response.body.data.invoice_extraction_review.extracted_fields.invoiceNumber, invoiceNumber);
+    assert.equal(response.body.data.invoice_extraction_review.extracted_fields.vendor.name, 'Bharat Steel Industries');
+    assert.equal(response.body.data.invoice_extraction_review.validation_errors.length, 0);
+  } finally {
+    ocrService.extractText = originalExtractText;
+    delete require.cache[require.resolve('../controllers/erpController')];
+    delete require.cache[require.resolve('../routes/moduleRoutes')];
+    delete require.cache[require.resolve('../app')];
+    const reloaded = require('../app');
+    app = reloaded;
+  }
+});
+
+test('keeps uploaded documents available when OCR extraction fails and marks them for manual review', { skip: !integration }, async () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ocrService = require('../lib/ocr/ocrService');
+  const originalExtractText = ocrService.extractText;
+  const ValidationError = require('../lib/errors').ValidationError;
+  ocrService.extractText = async () => { throw new ValidationError('OCR could not read the invoice text.'); };
+  delete require.cache[require.resolve('../controllers/erpController')];
+  delete require.cache[require.resolve('../routes/moduleRoutes')];
+  delete require.cache[require.resolve('../app')];
+  const appWithFailingOcr = require('../app');
+
+  try {
+    const response = await request(appWithFailingOcr).post('/api/documents/upload').set('Authorization', context.auth).attach('file', png, { filename: 'unreadable.png', contentType: 'image/png' });
+    assert.equal(response.status, 201);
+    assert.equal(response.body.data.invoice_extraction_review.extraction_status, 'UNDER_REVIEW');
+    assert.ok(Array.isArray(response.body.data.invoice_extraction_review.validation_errors));
+    assert.match(response.body.data.invoice_extraction_review.validation_errors.join(' '), /OCR could not read the invoice text/i);
+    assert.ok(response.body.data.document_id);
+  } finally {
+    ocrService.extractText = originalExtractText;
+    delete require.cache[require.resolve('../controllers/erpController')];
+    delete require.cache[require.resolve('../routes/moduleRoutes')];
+    delete require.cache[require.resolve('../app')];
+    const reloaded = require('../app');
+    app = reloaded;
+  }
 });
 
 test('runs integration tests only with TEST_DATABASE_URL', { skip: !integration }, () => {
