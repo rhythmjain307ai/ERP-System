@@ -244,7 +244,7 @@ async function loadDocuments() {
     documentUi.count.textContent = response.pagination.total;
     documentUi.list.innerHTML = response.data.length ? response.data.map(documentSummary).join('') : '<p class="empty-copy">No documents match these filters.</p>';
     documentUi.list.querySelectorAll('[data-document-id]').forEach(button => button.onclick = () => openDocument(button.dataset.documentId));
-  } catch (error) { documentUi.list.innerHTML = `<p class="empty-copy">${escapeHtml(error.message)}</p>`; if (error.message.includes('Authentication')) showDocumentAuth(); }
+  } catch (error) { documentUi.list.innerHTML = `<p class="empty-copy">${escapeHtml(error.message)}</p>`; if (/authentication|bearer token|invalid or inactive/i.test(error.message)) showDocumentAuth(); }
 }
 async function openDocument(id) {
   documentUi.detail.hidden = false;
