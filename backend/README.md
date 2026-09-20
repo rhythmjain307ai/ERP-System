@@ -93,7 +93,7 @@ Purchase orders, GRNs, customer orders, and deliveries use the same `items` shap
 
 ## Deferred workflows
 
-GRN posting creates inventory stock and `PURCHASE_RECEIPT` stock movements. Delivery dispatch creates `SALE_ISSUE` movements and deducts stock atomically; insufficient stock blocks the complete dispatch. Partial dispatch, production movements, inventory transfers, job-work movements, accounting posting, payment allocation, and automatic approval transitions remain deferred. Future payment settlement must use `payment_allocation`; no API in this foundation treats direct invoice references on `payment` as a settlement source.
+GRN posting creates inventory stock and `PURCHASE_RECEIPT` stock movements. Delivery dispatch creates `SALE_ISSUE` movements and deducts stock atomically; insufficient stock blocks the complete dispatch. Partial dispatch, inventory transfers, job-work movements, accounting posting, payment allocation, and automatic approval transitions remain deferred. Future payment settlement must use `payment_allocation`; no API in this foundation treats direct invoice references on `payment` as a settlement source.
 
 ## Tests
 

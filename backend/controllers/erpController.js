@@ -310,7 +310,7 @@ async function consumeProductionMaterials(req, res) {
       include: { production_order: { include: { bill_of_material: { include: { bom_item: { include: { inventory_item: true } } } }, factory: true } } }
     });
     if (!workOrder) throw new NotFoundError('work order');
-    if (!['PENDING', 'RUNNING', 'IN_PROGRESS'].includes(workOrder.status)) throw new ApiError(409, `Work order is already ${workOrder.status}`);
+    if (!['PENDING', 'RUNNING'].includes(workOrder.status)) throw new ApiError(409, `Work order is already ${workOrder.status}`);
     if (!workOrder.production_order) throw new ValidationError('Work order is not linked to a production order');
     const productionOrder = workOrder.production_order;
     if (!productionOrder.bill_of_material) throw new ValidationError('Production order has no BOM');
@@ -389,15 +389,21 @@ async function outputProductionGoods(req, res) {
   const result = await prisma.$transaction(async (tx) => {
     const locked = await tx.$queryRaw`SELECT "work_order_id" FROM "public"."work_order" WHERE "work_order_id" = ${workOrderId} FOR UPDATE`;
     if (locked.length === 0) throw new NotFoundError('work order');
-    const workOrder = await tx.work_order.findUnique({ where: { work_order_id: workOrderId }, include: { production_order: { include: { inventory_item: true, factory: true, work_order: true } } } });
+    const workOrder = await tx.work_order.findUnique({ where: { work_order_id: workOrderId }, include: { production_order: { include: { inventory_item: true, factory: true, work_order: true, bill_of_material: { include: { bom_item: true } } } } } });
     if (!workOrder) throw new NotFoundError('work order');
-    if (!['RUNNING', 'IN_PROGRESS'].includes(workOrder.status)) throw new ApiError(409, 'Output is allowed only after material consumption');
+    if (workOrder.status !== 'RUNNING') throw new ApiError(409, 'Output is allowed only after material consumption');
     const productionOrder = workOrder.production_order;
     if (!productionOrder) throw new ValidationError('Work order is not linked to a production order');
-    const consumptionCount = await tx.production_consumption.count({ where: { work_order_id: workOrderId } });
-    if (consumptionCount === 0) throw new ApiError(409, 'Output is allowed only after material consumption');
+    if (!productionOrder.bill_of_material || productionOrder.bill_of_material.bom_item.length === 0) throw new ValidationError('Production order has no BOM');
+    const consumed = await tx.production_consumption.groupBy({ by: ['inventory_item_id'], where: { work_order_id: workOrderId }, _sum: { quantity: true } });
+    const consumedByComponent = new Map(consumed.map((row) => [row.inventory_item_id.toString(), Number(row._sum.quantity || 0)]));
     if (inventoryItemId !== productionOrder.inventory_item_id) throw new ValidationError('Output item must match the production order finished item');
     if (!workOrder.planned_quantity || quantity > Number(workOrder.planned_quantity)) throw new ValidationError('Output quantity cannot exceed the work order planned quantity');
+    for (const bomItem of productionOrder.bill_of_material.bom_item) {
+      const requiredQuantity = quantity * Number(bomItem.quantity_per_unit);
+      const consumedQuantity = consumedByComponent.get(bomItem.component_item_id.toString()) || 0;
+      if (consumedQuantity < requiredQuantity) throw new ValidationError(`Insufficient consumption for BOM component ${bomItem.component_item_id}: required ${requiredQuantity}, consumed ${consumedQuantity}`);
+    }
     const previousOutput = await tx.production_output.findFirst({ where: { work_order_id: workOrderId } });
     if (previousOutput) throw new ApiError(409, 'Work order output has already been posted');
     const item = productionOrder.inventory_item;
