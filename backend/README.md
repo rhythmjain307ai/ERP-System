@@ -58,6 +58,10 @@ Transactional creation endpoints:
 - `POST /api/sales/deliveries/:id/dispatch` (protected by `inventory.write`; deducts available stock atomically)
 - `POST /api/sales/invoices`
 - `POST /api/documents`
+- `POST /api/documents/upload`
+- `GET /api/documents`
+- `GET /api/documents/:id`
+- `GET /api/documents/:id/file`
 - `PATCH /api/documents/reviews/:id`
 - `POST /api/approvals/requests`
 - `POST /api/approvals/actions`
@@ -83,6 +87,16 @@ Example sales invoice:
 ```
 
 Purchase orders, GRNs, customer orders, and deliveries use the same `items` shape with their schema-specific parent and line fields. Document creation accepts `document_type`, `file_name`, and an optional `review` object. Approval requests calculate the next `request_version` inside a transaction.
+
+## OCR document ingestion
+
+Open `http://localhost:4000` after starting the backend and use **Documents → Scan / Upload**. The backend accepts JPG, JPEG, PNG, and PDF files up to 10 MB. It saves the binary outside the source code in `backend/uploads/` (which is ignored by Git), stores only metadata in PostgreSQL, and serves originals through the authenticated `GET /api/documents/:id/file` route.
+
+For JPG/PNG, Tesseract.js performs local OCR; no cloud OCR key is required. The result is stored as raw OCR text and passed to a deterministic Indian-invoice parser for invoice number, date, GSTIN, vendor, tax totals, and potential item lines. Validation then calculates a confidence score. Missing or inconsistent fields produce `NEEDS_REVIEW`; OCR data is never automatically approved. PDFs are securely uploaded and marked for manual review in this first version because Tesseract.js does not render PDF pages itself.
+
+The Documents UI uses the existing bearer-token authorization. In development, generate a token for a seeded user with `createAuthToken` from `middleware/auth.js`, then paste the token into the Documents connection prompt. A production ERP login should supply that same existing token in `localStorage.erpAuthToken`; the OCR feature does not add a second authentication system.
+
+Reviewers with `documents.review` can edit extracted values, save corrections, approve a valid document, or reject it. Approval is refused until validation issues are resolved. Upload/update needs `documents.write`. The current feature only prepares reviewed documents; it does not create vendor invoices, post stock, create accounting entries, or pay anything automatically.
 
 ## Deferred workflows
 

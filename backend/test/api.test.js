@@ -28,6 +28,11 @@ test('returns 404 for unknown routes', async () => {
   assert.equal(response.body.success, false);
 });
 
+test('requires authentication before accepting document uploads', async () => {
+  const response = await request(app).post('/api/documents/upload').attach('file', Buffer.from([0xff, 0xd8, 0xff]), { filename: 'invoice.jpg', contentType: 'image/jpeg' });
+  assert.equal(response.status, 401);
+});
+
 test('runs integration tests only with TEST_DATABASE_URL', { skip: !integration }, () => {
   assert.ok(context);
 });

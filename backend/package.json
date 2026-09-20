@@ -9,13 +9,15 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev --name init",
     "seed": "node prisma/seed.js",
-    "test": "node --test test/api.test.js"
+    "test": "node --test test/api.test.js test/ocr.test.js test/upload.test.js"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
     "dotenv": "^16.0.3",
     "express": "^4.18.2",
-    "prisma": "^6.19.3"
+    "multer": "^2.4.0",
+    "prisma": "^6.19.3",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "supertest": "^7.2.2"

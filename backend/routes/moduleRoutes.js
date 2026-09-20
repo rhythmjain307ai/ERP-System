@@ -4,6 +4,7 @@ const makeCrud = require('../controllers/crudController');
 const workflow = require('../controllers/erpController');
 const weighbridge = require('../controllers/weighbridgeController');
 const { requireAuth, requirePermission } = require('../middleware/auth');
+const { documentUpload } = require('../middleware/upload');
 
 const userResponseSelect = {
   user_id: true,
@@ -48,7 +49,15 @@ function createRoutes() {
   const inventory = express.Router(); inventory.use('/items', crudRouter(configs['inventory-items'], 'inventory.write')); inventory.use('/warehouses', crudRouter(configs.warehouses, 'inventory.write')); inventory.use('/lots', crudRouter(configs['inventory-lots'], 'inventory.write')); inventory.use('/movements', crudRouter(configs['stock-movements'], 'inventory.write'));
   const procurement = express.Router(); procurement.post('/requisitions', requireAuth, requirePermission('procurement.write'), asyncHandler(workflow.createRequisition)); procurement.post('/purchase-orders', requireAuth, requirePermission('procurement.write'), asyncHandler(workflow.createPurchaseOrder)); procurement.post('/grns', requireAuth, requirePermission('procurement.write'), asyncHandler(workflow.createGrn)); procurement.post('/grns/:id/post', requireAuth, requirePermission('inventory.write'), asyncHandler(workflow.postGrn));
   const sales = express.Router(); sales.post('/orders', requireAuth, requirePermission('sales.write'), asyncHandler(workflow.createCustomerOrder)); sales.post('/deliveries', requireAuth, requirePermission('sales.write'), asyncHandler(workflow.createDelivery)); sales.post('/deliveries/:id/dispatch', requireAuth, requirePermission('inventory.write'), asyncHandler(workflow.dispatchDelivery)); sales.post('/invoices', requireAuth, requirePermission('sales.write'), asyncHandler(workflow.createSalesInvoice));
-  const documents = express.Router(); documents.post('/', requireAuth, requirePermission('documents.write'), asyncHandler(workflow.createDocument)); documents.get('/reviews/:id', requireAuth, requirePermission('documents.review'), asyncHandler(workflow.getReview)); documents.patch('/reviews/:id', requireAuth, requirePermission('documents.review'), asyncHandler(workflow.updateReview)); documents.get('/:id', asyncHandler(workflow.getDocument)); documents.patch('/:id', requireAuth, requirePermission('documents.write'), asyncHandler(workflow.updateDocument));
+  const documents = express.Router();
+  documents.post('/upload', requireAuth, requirePermission('documents.write'), documentUpload, asyncHandler(workflow.uploadDocument));
+  documents.get('/', requireAuth, asyncHandler(workflow.listDocuments));
+  documents.get('/reviews/:id', requireAuth, requirePermission('documents.review'), asyncHandler(workflow.getReview));
+  documents.patch('/reviews/:id', requireAuth, requirePermission('documents.review'), asyncHandler(workflow.updateReview));
+  documents.get('/:id/file', requireAuth, asyncHandler(workflow.getDocumentFile));
+  documents.post('/', requireAuth, requirePermission('documents.write'), asyncHandler(workflow.createDocument));
+  documents.get('/:id', requireAuth, asyncHandler(workflow.getDocument));
+  documents.patch('/:id', requireAuth, requirePermission('documents.write'), asyncHandler(workflow.updateDocument));
   const approvals = express.Router(); approvals.post('/requests', requireAuth, requirePermission('approvals.create'), asyncHandler(workflow.createApprovalRequest)); approvals.post('/actions', requireAuth, requirePermission('approvals.action'), asyncHandler(workflow.submitApprovalAction));
   const weighbridgeTickets = express.Router(); weighbridgeTickets.post('/', requireAuth, requirePermission('master.write'), asyncHandler(weighbridge.create)); weighbridgeTickets.patch('/:id', requireAuth, requirePermission('master.write'), asyncHandler(weighbridge.update));
   return { master, inventory, procurement, sales, documents, approvals, weighbridgeTickets, customers: crudRouter(configs.customers), vendors: crudRouter(configs.vendors) };

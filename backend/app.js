@@ -1,10 +1,12 @@
 const express = require('express');
+const path = require('path');
 const serialize = require('./lib/serialize');
 const errorHandler = require('./middleware/errors');
 const { createRoutes } = require('./routes/moduleRoutes');
 
 const app = express();
 app.use(express.json());
+app.use(express.static(path.resolve(__dirname, '..', 'app')));
 app.use((req, res, next) => {
   const json = res.json.bind(res);
   res.json = (body) => json(serialize(body));
