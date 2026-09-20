@@ -479,6 +479,7 @@ async function createVendorInvoice(req, res) {
 
     const preparedItems = [];
     const requestedByPoItem = new Map();
+    const requestedByGrnItem = new Map();
     const roundMoney = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
     let taxableAmount = 0;
     let discountAmount = 0;
@@ -517,6 +518,23 @@ async function createVendorInvoice(req, res) {
       const lineCgstAmount = roundMoney(lineTaxAmount / 2);
       const lineSgstAmount = roundMoney(lineTaxAmount - lineCgstAmount);
       const lineTotal = roundMoney(lineTaxableAmount + lineTaxAmount);
+      const matches = [];
+      for (const [matchIndex, match] of (Array.isArray(item.matches) ? item.matches : []).entries()) {
+        const grnItemId = id(match.grn_item_id, `items[${index}].matches[${matchIndex}].grn_item_id`);
+        const matchedQuantity = number(match.matched_quantity, `items[${index}].matches[${matchIndex}].matched_quantity`);
+        if (matchedQuantity <= 0) throw new ValidationError('matched_quantity must be greater than zero');
+        const grnItem = await tx.grn_item.findUnique({ where: { grn_item_id: grnItemId }, include: { grn: { select: { vendor_id: true, purchase_order_id: true } } } });
+        if (!grnItem) throw new ValidationError('GRN item does not exist');
+        if (grnItem.grn.vendor_id !== vendorId) throw new ValidationError('GRN item vendor must match invoice vendor');
+        if (purchaseOrderId !== undefined && grnItem.grn.purchase_order_id !== purchaseOrderId) throw new ValidationError('GRN item purchase order must match invoice purchase order');
+        if (grnItem.inventory_item_id !== inventoryItemId) throw new ValidationError('GRN item inventory item must match invoice item');
+        if (grnItem.uom !== item.uom) throw new ValidationError('GRN item UOM must match invoice item');
+        const matchKey = grnItemId.toString();
+        requestedByGrnItem.set(matchKey, (requestedByGrnItem.get(matchKey) || 0) + matchedQuantity);
+        matches.push({ grnItemId, matchedQuantity });
+      }
+      const totalMatchedQuantity = matches.reduce((total, match) => total + match.matchedQuantity, 0);
+      if (totalMatchedQuantity > quantity) throw new ValidationError('Matched quantity exceeds invoice item quantity');
       preparedItems.push({
         index,
         inventoryItemId,
@@ -532,7 +550,8 @@ async function createVendorInvoice(req, res) {
         lineTaxableAmount,
         lineCgstAmount,
         lineSgstAmount,
-        lineTotal
+        lineTotal,
+        matches
       });
       taxableAmount += lineTaxableAmount;
       discountAmount += discount;
@@ -545,6 +564,12 @@ async function createVendorInvoice(req, res) {
       const alreadyInvoiced = await tx.vendor_invoice_item.aggregate({ where: { purchase_order_item_id: BigInt(purchaseOrderItemId) }, _sum: { quantity: true } });
       const orderedQuantity = Number(preparedItems.find((item) => item.purchaseOrderItemId.toString() === purchaseOrderItemId).purchaseOrderItem.ordered_quantity);
       if (Number(alreadyInvoiced._sum.quantity || 0) + requestedQuantity > orderedQuantity) throw new ValidationError('Invoice quantity exceeds purchase order quantity');
+    }
+
+    for (const [grnItemId, requestedQuantity] of requestedByGrnItem) {
+      const alreadyMatched = await tx.vendor_invoice_grn_match.aggregate({ where: { grn_item_id: BigInt(grnItemId) }, _sum: { matched_quantity: true } });
+      const grnItem = await tx.grn_item.findUnique({ where: { grn_item_id: BigInt(grnItemId) }, select: { accepted_quantity: true } });
+      if (Number(alreadyMatched._sum.matched_quantity || 0) + requestedQuantity > Number(grnItem.accepted_quantity)) throw new ValidationError('Matched quantity exceeds GRN accepted quantity');
     }
 
     const invoice = await tx.vendor_invoice.create({ data: {
@@ -571,7 +596,7 @@ async function createVendorInvoice(req, res) {
     } });
 
     for (const item of preparedItems) {
-      await tx.vendor_invoice_item.create({ data: {
+      const invoiceItem = await tx.vendor_invoice_item.create({ data: {
         vendor_invoice_id: invoice.vendor_invoice_id,
         purchase_order_item_id: item.purchaseOrderItemId,
         inventory_item_id: item.inventoryItemId,
@@ -588,8 +613,12 @@ async function createVendorInvoice(req, res) {
         igst_amount: 0,
         line_total: item.lineTotal
       } });
+      for (const match of item.matches) {
+        await tx.vendor_invoice_grn_match.create({ data: { vendor_invoice_item_id: invoiceItem.vendor_invoice_item_id, grn_item_id: match.grnItemId, matched_quantity: match.matchedQuantity } });
+      }
     }
-    return tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoice.vendor_invoice_id }, include: { vendor_invoice_item: true } });
+    const createdInvoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoice.vendor_invoice_id }, include: { vendor_invoice_item: { include: { vendor_invoice_grn_match: true } } } });
+    return { ...createdInvoice, vendor_invoice_item: createdInvoice.vendor_invoice_item.map((item) => ({ ...item, match_status: Number(item.vendor_invoice_grn_match.reduce((total, match) => total + Number(match.matched_quantity), 0)) === 0 ? 'UNMATCHED' : Number(item.vendor_invoice_grn_match.reduce((total, match) => total + Number(match.matched_quantity), 0)) >= Number(item.quantity) ? 'FULLY_MATCHED' : 'PARTIALLY_MATCHED' })) };
   });
   res.status(201).json({ success: true, data: result });
 }

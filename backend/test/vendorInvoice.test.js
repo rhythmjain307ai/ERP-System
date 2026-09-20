@@ -37,6 +37,24 @@ async function postInvoice(body) {
   return request(app).post('/api/procurement/vendor-invoices').set('Authorization', context.auth).send(body);
 }
 
+async function createAcceptedGrn({ vendorId = context.vendorId, purchaseOrderId, purchaseOrderItemId, inventoryItemId = context.inventoryItemId, uom = 'EA', quantity = 5 } = {}) {
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const response = await request(app).post('/api/procurement/grns').set('Authorization', context.auth).send({
+    grn_number: `GRN-MATCH-${suffix}`,
+    purchase_order_id: purchaseOrderId,
+    vendor_id: vendorId,
+    warehouse_id: context.warehouseId,
+    items: [{ purchase_order_item_id: purchaseOrderItemId, inventory_item_id: inventoryItemId, uom, received_quantity: quantity }]
+  });
+  assert.equal(response.status, 201);
+  const grnId = BigInt(response.body.data.grn_id);
+  const grnItemId = BigInt(response.body.data.grn_item[0].grn_item_id);
+  context.created.grnIds.push(grnId);
+  const posted = await request(app).post(`/api/procurement/grns/${grnId}/post`).set('Authorization', context.auth).send({ inspection_status: 'PASSED', items: [{ grn_item_id: grnItemId.toString(), accepted_quantity: quantity }] });
+  assert.equal(posted.status, 200);
+  return { grnId: grnId.toString(), grnItemId: grnItemId.toString() };
+}
+
 test.before(async () => {
   context = await setupIntegration();
 });
@@ -281,4 +299,128 @@ test('still rolls back after PO validation and calculated item preparation', { s
   const response = await postInvoice(body);
   assert.equal(response.status, 400);
   assert.equal(await prisma.vendor_invoice.count({ where: { invoice_number: body.invoice_number } }), 0);
+});
+
+test('creates a single GRN match', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ quantity: 5 });
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 2 }] }] }));
+  assert.equal(response.status, 201);
+  assert.equal(response.body.data.vendor_invoice_item[0].vendor_invoice_grn_match.length, 1);
+  assert.equal(response.body.data.vendor_invoice_item[0].match_status, 'FULLY_MATCHED');
+  context.created.vendorInvoiceIds.push(BigInt(response.body.data.vendor_invoice_id));
+});
+
+test('supports multiple GRN matches for one invoice item', { skip: !integration }, async () => {
+  const first = await createAcceptedGrn({ quantity: 2 });
+  const second = await createAcceptedGrn({ quantity: 2 });
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 3, rate: 12.5, matches: [{ grn_item_id: first.grnItemId, matched_quantity: 1 }, { grn_item_id: second.grnItemId, matched_quantity: 2 }] }] }));
+  assert.equal(response.status, 201);
+  assert.equal(response.body.data.vendor_invoice_item[0].vendor_invoice_grn_match.length, 2);
+  assert.equal(response.body.data.vendor_invoice_item[0].match_status, 'FULLY_MATCHED');
+  context.created.vendorInvoiceIds.push(BigInt(response.body.data.vendor_invoice_id));
+});
+
+test('reports a partial GRN match', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ quantity: 5 });
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 3, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 2 }] }] }));
+  assert.equal(response.status, 201);
+  assert.equal(response.body.data.vendor_invoice_item[0].match_status, 'PARTIALLY_MATCHED');
+  context.created.vendorInvoiceIds.push(BigInt(response.body.data.vendor_invoice_id));
+});
+
+test('reports an unmatched invoice item', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody());
+  assert.equal(response.status, 201);
+  assert.equal(response.body.data.vendor_invoice_item[0].match_status, 'UNMATCHED');
+  context.created.vendorInvoiceIds.push(BigInt(response.body.data.vendor_invoice_id));
+});
+
+test('rejects a missing GRN item', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 12.5, matches: [{ grn_item_id: '999999999', matched_quantity: 1 }] }] }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /GRN item does not exist/);
+});
+
+test('rejects zero and negative match quantities', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ quantity: 5 });
+  for (const matchedQuantity of [0, -1]) {
+    const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: matchedQuantity }] }] }));
+    assert.equal(response.status, 400);
+    assert.match(response.body.error.message, /matched_quantity must be greater than zero/);
+  }
+});
+
+test('rejects an inventory mismatch between invoice and GRN', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ inventoryItemId: context.lotInventoryItemId, quantity: 1 });
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 1 }] }] }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /inventory item must match/);
+});
+
+test('rejects a UOM mismatch between invoice and GRN', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ uom: 'KG', quantity: 1 });
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 1 }] }] }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /UOM must match/);
+});
+
+test('rejects a GRN vendor mismatch', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ vendorId: context.otherVendorId, quantity: 1 });
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 1 }] }] }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /vendor must match/);
+});
+
+test('rejects a GRN PO mismatch', { skip: !integration }, async () => {
+  const first = await createPurchaseOrder({ quantity: 2 });
+  const second = await createPurchaseOrder({ quantity: 2 });
+  const grn = await createAcceptedGrn({ purchaseOrderId: second.purchaseOrderId, purchaseOrderItemId: second.purchaseOrderItemId, quantity: 1 });
+  const response = await postInvoice(invoiceBody({ purchase_order_id: first.purchaseOrderId, items: [{ inventory_item_id: context.inventoryItemId, purchase_order_item_id: first.purchaseOrderItemId, uom: 'EA', quantity: 1, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 1 }] }] }));
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /purchase order must match/);
+});
+
+test('rejects match quantity above invoice quantity', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ quantity: 5 });
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 2 }] }] }));
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error.message, 'Matched quantity exceeds invoice item quantity');
+});
+
+test('rejects match quantity above accepted GRN quantity', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ quantity: 2 });
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 3, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 3 }] }] }));
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error.message, 'Matched quantity exceeds GRN accepted quantity');
+});
+
+test('prevents multiple invoices from overmatching one GRN item', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ quantity: 2 });
+  const item = { inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 2 }] };
+  const first = await postInvoice(invoiceBody({ items: [item] }));
+  assert.equal(first.status, 201);
+  context.created.vendorInvoiceIds.push(BigInt(first.body.data.vendor_invoice_id));
+  const second = await postInvoice(invoiceBody({ items: [item] }));
+  assert.equal(second.status, 400);
+  assert.equal(second.body.error.message, 'Matched quantity exceeds GRN accepted quantity');
+});
+
+test('rolls back invoice and matches when a duplicate match insert fails', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ quantity: 2 });
+  const body = invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 1 }, { grn_item_id: grn.grnItemId, matched_quantity: 1 }] }] });
+  const response = await postInvoice(body);
+  assert.equal(response.status, 409);
+  assert.equal(await prisma.vendor_invoice.count({ where: { invoice_number: body.invoice_number } }), 0);
+  assert.equal(await prisma.vendor_invoice_grn_match.count({ where: { grn_item_id: BigInt(grn.grnItemId) } }), 0);
+});
+
+test('matching keeps DRAFT status and creates no AP or accounting records', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ quantity: 1 });
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 1 }] }] }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  assert.equal(response.body.data.status, 'DRAFT');
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 0);
+  assert.equal(await prisma.accounting_entry.count({ where: { source_type: 'VENDOR_INVOICE', source_id: invoiceId } }), 0);
+  context.created.vendorInvoiceIds.push(invoiceId);
 });
