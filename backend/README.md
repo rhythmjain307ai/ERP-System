@@ -47,6 +47,13 @@ Master data CRUD is available under `/api/master` for `companies`, `factories`, 
 
 Inventory CRUD is available under `/api/inventory/items`, `/api/inventory/warehouses`, `/api/inventory/lots`, and `/api/inventory/movements`. GRN inventory posting is available through the protected `/api/procurement/grns/:id/post` endpoint and requires `inventory.write`.
 
+Production inventory posting is available through these protected endpoints, which require `inventory.write`:
+
+- `POST /api/production/work-orders/:id/consume` (consume BOM components from inventory)
+- `POST /api/production/work-orders/:id/output` (receive finished goods into inventory)
+
+Both operations run transactionally and create `stock_movement` records with `PRODUCTION_CONSUMPTION` or `PRODUCTION_OUTPUT` movement types.
+
 Transactional creation endpoints:
 
 - `POST /api/procurement/requisitions`
@@ -86,7 +93,7 @@ Purchase orders, GRNs, customer orders, and deliveries use the same `items` shap
 
 ## Deferred workflows
 
-GRN posting creates inventory stock and `PURCHASE_RECEIPT` stock movements. Delivery dispatch creates `SALE_ISSUE` movements and deducts stock atomically; insufficient stock blocks the complete dispatch. Partial dispatch, production movements, inventory transfers, job-work movements, accounting posting, payment allocation, and automatic approval transitions remain deferred. Future payment settlement must use `payment_allocation`; no API in this foundation treats direct invoice references on `payment` as a settlement source.
+GRN posting creates inventory stock and `PURCHASE_RECEIPT` stock movements. Delivery dispatch creates `SALE_ISSUE` movements and deducts stock atomically; insufficient stock blocks the complete dispatch. Partial dispatch, inventory transfers, job-work movements, accounting posting, payment allocation, and automatic approval transitions remain deferred. Future payment settlement must use `payment_allocation`; no API in this foundation treats direct invoice references on `payment` as a settlement source.
 
 ## Tests
 

@@ -86,6 +86,167 @@ async function dispatch(deliveryId) {
   return request(app).post(`/api/sales/deliveries/${deliveryId}/dispatch`).set('Authorization', context.auth).send({});
 }
 
+async function createProductionFixture({ lotTrackedOutput = false, plannedQuantity = 5, componentQuantity = 1, secondComponent = false } = {}) {
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const warehouse = await prisma.warehouse.findUnique({ where: { warehouse_id: BigInt(context.warehouseId) } });
+  const finishedItem = await prisma.inventory_item.create({ data: { item_code: `FG-${suffix}`, item_name: `Finished ${suffix}`, base_uom: 'EA', is_lot_tracked: lotTrackedOutput } });
+  context.created.productionItemIds.push(finishedItem.inventory_item_id);
+  const bom = await prisma.bill_of_material.create({ data: { finished_item_id: finishedItem.inventory_item_id, bom_code: `BOM-${suffix}`, version: '1' } });
+  context.created.bomIds.push(bom.bom_id);
+  await prisma.bom_item.create({ data: { bom_id: bom.bom_id, component_item_id: BigInt(context.inventoryItemId), quantity_per_unit: componentQuantity, uom: 'EA' } });
+  let secondRawItem = null;
+  if (secondComponent) {
+    secondRawItem = await prisma.inventory_item.create({ data: { item_code: `RM-${suffix}`, item_name: `Second raw ${suffix}`, base_uom: 'EA' } });
+    context.created.productionItemIds.push(secondRawItem.inventory_item_id);
+    await prisma.bom_item.create({ data: { bom_id: bom.bom_id, component_item_id: secondRawItem.inventory_item_id, quantity_per_unit: componentQuantity, uom: 'EA' } });
+    await prisma.inventory_stock.create({ data: { inventory_item_id: secondRawItem.inventory_item_id, warehouse_id: BigInt(context.warehouseId), quantity: 10, reserved_quantity: 0 } });
+  }
+  const productionOrder = await prisma.production_order.create({ data: { production_order_number: `PROD-${suffix}`, inventory_item_id: finishedItem.inventory_item_id, bom_id: bom.bom_id, factory_id: warehouse.factory_id, planned_quantity: plannedQuantity } });
+  context.created.productionOrderIds.push(productionOrder.production_order_id);
+  const workOrder = await prisma.work_order.create({ data: { production_order_id: productionOrder.production_order_id, work_order_number: `WO-${suffix}`, operation_name: 'Assembly', planned_quantity: plannedQuantity } });
+  context.created.workOrderIds.push(workOrder.work_order_id);
+  return { finishedItem, productionOrder, workOrder, warehouse, secondRawItem };
+}
+
+function consumeBody(fixture, quantity = 5, overrides = {}) {
+  const items = [{ inventory_item_id: context.inventoryItemId, uom: 'EA', warehouse_id: context.warehouseId, quantity, ...overrides }];
+  if (fixture.secondRawItem) items.push({ inventory_item_id: fixture.secondRawItem.inventory_item_id.toString(), uom: 'EA', warehouse_id: context.warehouseId, quantity });
+  return { production_quantity: quantity, items };
+}
+
+async function consumeProduction(fixture, quantity = 5, overrides = {}) {
+  return request(app).post(`/api/production/work-orders/${fixture.workOrder.work_order_id}/consume`).set('Authorization', context.auth).send(consumeBody(fixture, quantity, overrides));
+}
+
+async function outputProduction(fixture, quantity = 5, overrides = {}) {
+  return request(app).post(`/api/production/work-orders/${fixture.workOrder.work_order_id}/output`).set('Authorization', context.auth).send({ inventory_item_id: fixture.finishedItem.inventory_item_id.toString(), warehouse_id: context.warehouseId, quantity, ...overrides });
+}
+
+test('posts BOM-based production consumption for each component', { skip: !integration }, async () => {
+  const fixture = await createProductionFixture({ componentQuantity: 1, secondComponent: true });
+  await resetStock(10);
+  const response = await consumeProduction(fixture, 5);
+  assert.equal(response.status, 200);
+  assert.equal(Number((await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } })).quantity), 5);
+  assert.equal(Number((await prisma.inventory_stock.findFirst({ where: { inventory_item_id: fixture.secondRawItem.inventory_item_id, warehouse_id: BigInt(context.warehouseId), lot_id: null } })).quantity), 5);
+  assert.equal(await prisma.stock_movement.count({ where: { reference_type: 'WORK_ORDER', reference_id: fixture.workOrder.work_order_id, movement_type: 'PRODUCTION_CONSUMPTION' } }), 2);
+  assert.equal((await prisma.work_order.findUnique({ where: { work_order_id: fixture.workOrder.work_order_id } })).status, 'RUNNING');
+});
+
+test('rolls back all consumption when one material is insufficient', { skip: !integration }, async () => {
+  const fixture = await createProductionFixture({ componentQuantity: 1 });
+  await resetStock(2);
+  const response = await consumeProduction(fixture, 5);
+  assert.equal(response.status, 400);
+  assert.equal(Number((await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } })).quantity), 2);
+  assert.equal(await prisma.stock_movement.count({ where: { reference_id: fixture.workOrder.work_order_id } }), 0);
+});
+
+test('rejects consumption above BOM requirement and cumulative over-consumption', { skip: !integration }, async () => {
+  const fixture = await createProductionFixture({ componentQuantity: 1 });
+  await resetStock(20);
+  assert.equal((await consumeProduction(fixture, 5, { quantity: 6 })).status, 400);
+  assert.equal((await consumeProduction(fixture, 3)).status, 200);
+  assert.equal((await consumeProduction(fixture, 3)).status, 400);
+  assert.equal(await prisma.stock_movement.count({ where: { reference_id: fixture.workOrder.work_order_id, movement_type: 'PRODUCTION_CONSUMPTION' } }), 1);
+});
+
+test('rejects invalid component, warehouse, or lot without stock changes', { skip: !integration }, async () => {
+  const fixture = await createProductionFixture();
+  await resetStock(10);
+  const invalidComponent = await request(app).post(`/api/production/work-orders/${fixture.workOrder.work_order_id}/consume`).set('Authorization', context.auth).send({ production_quantity: 1, items: [{ inventory_item_id: context.lotInventoryItemId, uom: 'EA', warehouse_id: context.warehouseId, quantity: 1 }] });
+  assert.equal(invalidComponent.status, 400);
+  const invalidWarehouse = await consumeProduction(fixture, 1, { warehouse_id: '999999999' });
+  assert.equal(invalidWarehouse.status, 400);
+  const invalidLot = await consumeProduction(fixture, 1, { lot_id: '999999999' });
+  assert.equal(invalidLot.status, 400);
+  assert.equal(Number((await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } })).quantity), 10);
+});
+
+test('serializes concurrent consumption against stock and BOM limits', { skip: !integration }, async () => {
+  const fixture = await createProductionFixture({ componentQuantity: 1 });
+  await resetStock(5);
+  const responses = await Promise.all([consumeProduction(fixture, 5), consumeProduction(fixture, 5)]);
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 400]);
+  assert.equal(Number((await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } })).quantity), 0);
+  assert.equal(await prisma.stock_movement.count({ where: { reference_id: fixture.workOrder.work_order_id, movement_type: 'PRODUCTION_CONSUMPTION' } }), 1);
+});
+
+test('posts finished-goods output and completes the production workflow', { skip: !integration }, async () => {
+  const fixture = await createProductionFixture();
+  await resetStock(10);
+  assert.equal((await consumeProduction(fixture)).status, 200);
+  const response = await outputProduction(fixture);
+  assert.equal(response.status, 200);
+  assert.equal(Number((await prisma.inventory_stock.findFirst({ where: { inventory_item_id: fixture.finishedItem.inventory_item_id, warehouse_id: BigInt(context.warehouseId), lot_id: null } })).quantity), 5);
+  assert.equal(await prisma.stock_movement.count({ where: { reference_id: fixture.workOrder.work_order_id, movement_type: 'PRODUCTION_OUTPUT' } }), 1);
+  assert.equal(await prisma.production_output.count({ where: { work_order_id: fixture.workOrder.work_order_id } }), 1);
+  assert.equal((await prisma.work_order.findUnique({ where: { work_order_id: fixture.workOrder.work_order_id } })).status, 'COMPLETED');
+  assert.equal((await prisma.production_order.findUnique({ where: { production_order_id: fixture.productionOrder.production_order_id } })).status, 'COMPLETED');
+});
+
+test('rejects output before consumption and above planned quantity', { skip: !integration }, async () => {
+  const beforeConsumption = await createProductionFixture({ plannedQuantity: 5 });
+  assert.equal((await outputProduction(beforeConsumption)).status, 409);
+  const overPlanned = await createProductionFixture({ plannedQuantity: 5 });
+  await resetStock(10);
+  assert.equal((await consumeProduction(overPlanned, 5)).status, 200);
+  assert.equal((await outputProduction(overPlanned, 6)).status, 400);
+  assert.equal(await prisma.production_output.count({ where: { work_order_id: overPlanned.workOrder.work_order_id } }), 0);
+});
+
+test('rejects output when a BOM component has not been consumed', { skip: !integration }, async () => {
+  const fixture = await createProductionFixture({ secondComponent: true });
+  await resetStock(10);
+  const beforeFinishedStock = await prisma.inventory_stock.findFirst({ where: { inventory_item_id: fixture.finishedItem.inventory_item_id, warehouse_id: BigInt(context.warehouseId), lot_id: null } });
+  assert.equal(beforeFinishedStock, null);
+  const consumption = await request(app).post(`/api/production/work-orders/${fixture.workOrder.work_order_id}/consume`).set('Authorization', context.auth).send({ production_quantity: 5, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', warehouse_id: context.warehouseId, quantity: 5 }] });
+  assert.equal(consumption.status, 200);
+  const beforeRawStock = await prisma.inventory_stock.findMany({ where: { inventory_item_id: { in: [BigInt(context.inventoryItemId), fixture.secondRawItem.inventory_item_id] }, warehouse_id: BigInt(context.warehouseId) }, orderBy: { inventory_item_id: 'asc' } });
+  const output = await outputProduction(fixture, 5);
+  assert.equal(output.status, 400);
+  const afterRawStock = await prisma.inventory_stock.findMany({ where: { inventory_item_id: { in: [BigInt(context.inventoryItemId), fixture.secondRawItem.inventory_item_id] }, warehouse_id: BigInt(context.warehouseId) }, orderBy: { inventory_item_id: 'asc' } });
+  assert.deepEqual(afterRawStock.map((stock) => String(stock.quantity)), beforeRawStock.map((stock) => String(stock.quantity)));
+  assert.equal(await prisma.inventory_stock.count({ where: { inventory_item_id: fixture.finishedItem.inventory_item_id, warehouse_id: BigInt(context.warehouseId) } }), 0);
+  assert.equal(await prisma.production_output.count({ where: { work_order_id: fixture.workOrder.work_order_id } }), 0);
+  assert.equal(await prisma.stock_movement.count({ where: { reference_id: fixture.workOrder.work_order_id, movement_type: 'PRODUCTION_OUTPUT' } }), 0);
+});
+
+test('rejects output when every component is consumed insufficiently', { skip: !integration }, async () => {
+  const fixture = await createProductionFixture({ secondComponent: true });
+  await resetStock(10);
+  const consumption = await consumeProduction(fixture, 2);
+  assert.equal(consumption.status, 200);
+  const beforeRawStock = await prisma.inventory_stock.findMany({ where: { inventory_item_id: { in: [BigInt(context.inventoryItemId), fixture.secondRawItem.inventory_item_id] }, warehouse_id: BigInt(context.warehouseId) }, orderBy: { inventory_item_id: 'asc' } });
+  const output = await outputProduction(fixture, 5);
+  assert.equal(output.status, 400);
+  const afterRawStock = await prisma.inventory_stock.findMany({ where: { inventory_item_id: { in: [BigInt(context.inventoryItemId), fixture.secondRawItem.inventory_item_id] }, warehouse_id: BigInt(context.warehouseId) }, orderBy: { inventory_item_id: 'asc' } });
+  assert.deepEqual(afterRawStock.map((stock) => String(stock.quantity)), beforeRawStock.map((stock) => String(stock.quantity)));
+  assert.equal(await prisma.inventory_stock.count({ where: { inventory_item_id: fixture.finishedItem.inventory_item_id, warehouse_id: BigInt(context.warehouseId) } }), 0);
+  assert.equal(await prisma.production_output.count({ where: { work_order_id: fixture.workOrder.work_order_id } }), 0);
+  assert.equal(await prisma.stock_movement.count({ where: { reference_id: fixture.workOrder.work_order_id, movement_type: 'PRODUCTION_OUTPUT' } }), 0);
+});
+
+test('rejects duplicate or concurrent output without duplicate movements', { skip: !integration }, async () => {
+  const fixture = await createProductionFixture();
+  await resetStock(10);
+  assert.equal((await consumeProduction(fixture)).status, 200);
+  const responses = await Promise.all([outputProduction(fixture), outputProduction(fixture)]);
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409]);
+  assert.equal(await prisma.production_output.count({ where: { work_order_id: fixture.workOrder.work_order_id } }), 1);
+  assert.equal(await prisma.stock_movement.count({ where: { reference_id: fixture.workOrder.work_order_id, movement_type: 'PRODUCTION_OUTPUT' } }), 1);
+});
+
+test('validates ownership of lot-tracked finished-goods output', { skip: !integration }, async () => {
+  const fixture = await createProductionFixture({ lotTrackedOutput: true });
+  await resetStock(10);
+  assert.equal((await consumeProduction(fixture)).status, 200);
+  const wrongLot = await prisma.inventory_lot.create({ data: { inventory_item_id: BigInt(context.lotInventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_number: `WRONG-OUTPUT-${Date.now()}`, quantity_received: 0, accepted_quantity: 0 } });
+  const response = await outputProduction(fixture, 5, { lot_id: wrongLot.lot_id.toString() });
+  assert.equal(response.status, 400);
+  assert.equal(await prisma.production_output.count({ where: { work_order_id: fixture.workOrder.work_order_id } }), 0);
+});
+
 test('creates a draft delivery without changing stock', { skip: !integration }, async () => {
   await resetStock(10);
   const before = await prisma.inventory_stock.findFirst({ where: { inventory_item_id: BigInt(context.inventoryItemId), warehouse_id: BigInt(context.warehouseId), lot_id: null } });
@@ -541,7 +702,7 @@ test('rejects a GRN line whose item differs from its purchase order line', { ski
   const fixture = await createReceiptFixture(5, 5, { grnInventoryItemId: context.lotInventoryItemId });
   const response = await request(app).post(`/api/procurement/grns/${fixture.grnId}/post`).set('Authorization', context.auth).send({ inspection_status: 'PASSED', items: [{ grn_item_id: fixture.grnItemId.toString(), accepted_quantity: 5 }] });
   assert.equal(response.status, 400);
-  const movementCount = await prisma.stock_movement.count({ where: { reference_id: fixture.grnId } });
+  const movementCount = await prisma.stock_movement.count({ where: { reference_type: 'GRN', reference_id: fixture.grnId, movement_type: 'PURCHASE_RECEIPT' } });
   assert.equal(movementCount, 0);
 });
 
