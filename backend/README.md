@@ -47,6 +47,13 @@ Master data CRUD is available under `/api/master` for `companies`, `factories`, 
 
 Inventory CRUD is available under `/api/inventory/items`, `/api/inventory/warehouses`, `/api/inventory/lots`, and `/api/inventory/movements`. GRN inventory posting is available through the protected `/api/procurement/grns/:id/post` endpoint and requires `inventory.write`.
 
+Production inventory posting is available through these protected endpoints, which require `inventory.write`:
+
+- `POST /api/production/work-orders/:id/consume` (consume BOM components from inventory)
+- `POST /api/production/work-orders/:id/output` (receive finished goods into inventory)
+
+Both operations run transactionally and create `stock_movement` records with `PRODUCTION_CONSUMPTION` or `PRODUCTION_OUTPUT` movement types.
+
 Transactional creation endpoints:
 
 - `POST /api/procurement/requisitions`

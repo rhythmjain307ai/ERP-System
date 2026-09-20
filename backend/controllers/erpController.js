@@ -295,6 +295,146 @@ async function dispatchDelivery(req, res) {
   res.json({ success: true, data: result });
 }
 
+async function consumeProductionMaterials(req, res) {
+  const workOrderId = id(req.params.id, 'id');
+  const productionQuantity = number(req.body.production_quantity ?? req.body.quantity, 'production_quantity');
+  if (productionQuantity <= 0) throw new ValidationError('production_quantity must be greater than zero');
+  const lines = req.body.items || req.body.consumption_lines;
+  if (!Array.isArray(lines) || lines.length === 0) throw new ValidationError('items must contain at least one consumption line');
+
+  const result = await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw`SELECT "work_order_id" FROM "public"."work_order" WHERE "work_order_id" = ${workOrderId} FOR UPDATE`;
+    if (locked.length === 0) throw new NotFoundError('work order');
+    const workOrder = await tx.work_order.findUnique({
+      where: { work_order_id: workOrderId },
+      include: { production_order: { include: { bill_of_material: { include: { bom_item: { include: { inventory_item: true } } } }, factory: true } } }
+    });
+    if (!workOrder) throw new NotFoundError('work order');
+    if (!['PENDING', 'RUNNING', 'IN_PROGRESS'].includes(workOrder.status)) throw new ApiError(409, `Work order is already ${workOrder.status}`);
+    if (!workOrder.production_order) throw new ValidationError('Work order is not linked to a production order');
+    const productionOrder = workOrder.production_order;
+    if (!productionOrder.bill_of_material) throw new ValidationError('Production order has no BOM');
+    if (productionOrder.status === 'CANCELLED' || productionOrder.status === 'COMPLETED') throw new ApiError(409, `Production order is already ${productionOrder.status}`);
+
+    const bomItems = new Map(productionOrder.bill_of_material.bom_item.map((item) => [item.component_item_id.toString(), item]));
+    const requestedByComponent = new Map();
+    const preparedLines = lines.map((line, index) => {
+      if (!line || (line.inventory_item_id === undefined && line.component_item_id === undefined && line.bom_item_id === undefined)) throw new ValidationError(`items[${index}].inventory_item_id is required`);
+      if (!line.uom) throw new ValidationError(`items[${index}].uom is required`);
+      const suppliedBomItem = line.bom_item_id === undefined ? null : productionOrder.bill_of_material.bom_item.find((item) => item.bom_item_id === id(line.bom_item_id, `items[${index}].bom_item_id`));
+      const inventoryItemId = id(line.inventory_item_id ?? line.component_item_id ?? suppliedBomItem?.component_item_id, `items[${index}].inventory_item_id`);
+      const bomItem = bomItems.get(inventoryItemId.toString());
+      if (!bomItem) throw new ValidationError(`items[${index}] is not a BOM component`);
+      if (suppliedBomItem && suppliedBomItem.bom_item_id !== bomItem.bom_item_id) throw new ValidationError(`items[${index}].bom_item_id does not match the component`);
+      if (line.uom !== bomItem.uom) throw new ValidationError(`items[${index}].uom must match the BOM component UOM`);
+      const quantity = number(line.quantity ?? line.consumed_quantity, `items[${index}].quantity`);
+      if (quantity <= 0) throw new ValidationError(`items[${index}].quantity must be greater than zero`);
+      const warehouseId = id(line.warehouse_id, `items[${index}].warehouse_id`);
+      const lotId = line.lot_id === undefined || line.lot_id === null ? (line.inventory_lot_id === undefined || line.inventory_lot_id === null ? null : id(line.inventory_lot_id, `items[${index}].inventory_lot_id`)) : id(line.lot_id, `items[${index}].lot_id`);
+      const key = `${inventoryItemId}:${warehouseId}:${lotId || 'null'}`;
+      requestedByComponent.set(inventoryItemId.toString(), (requestedByComponent.get(inventoryItemId.toString()) || 0) + quantity);
+      return { line, index, inventoryItemId, warehouseId, lotId, quantity, key };
+    });
+
+    const consumed = await tx.production_consumption.groupBy({ by: ['inventory_item_id'], where: { work_order_id: workOrderId }, _sum: { quantity: true } });
+    const consumedByComponent = new Map(consumed.map((row) => [row.inventory_item_id.toString(), Number(row._sum.quantity || 0)]));
+    for (const [componentId, requested] of requestedByComponent) {
+      const bomQuantity = Number(bomItems.get(componentId).quantity_per_unit);
+      const requestRequiredQuantity = productionQuantity * bomQuantity;
+      const orderRequiredQuantity = Number(workOrder.planned_quantity || productionQuantity) * bomQuantity;
+      const cumulativeQuantity = (consumedByComponent.get(componentId) || 0) + requested;
+      if (requested > requestRequiredQuantity) throw new ValidationError(`Consumption for BOM component ${componentId} exceeds required quantity ${requestRequiredQuantity}`);
+      if (cumulativeQuantity > orderRequiredQuantity) throw new ValidationError(`Cumulative consumption for BOM component ${componentId} exceeds work order requirement ${orderRequiredQuantity}`);
+    }
+
+    const stockBalances = new Map();
+    const requestedByStock = new Map();
+    for (const line of preparedLines.sort((left, right) => left.key.localeCompare(right.key))) {
+      if (!stockBalances.has(line.key)) stockBalances.set(line.key, await lockStockBalance(tx, line.inventoryItemId, line.warehouseId, line.lotId));
+      const warehouse = await tx.warehouse.findUnique({ where: { warehouse_id: line.warehouseId }, select: { factory_id: true } });
+      if (!warehouse || warehouse.factory_id !== productionOrder.factory_id) throw new ValidationError(`items[${line.index}].warehouse_id does not belong to the production order factory`);
+      const item = await tx.inventory_item.findUnique({ where: { inventory_item_id: line.inventoryItemId }, select: { is_lot_tracked: true } });
+      if (line.lotId) {
+        const lot = await tx.inventory_lot.findUnique({ where: { lot_id: line.lotId } });
+        if (!lot || lot.inventory_item_id !== line.inventoryItemId || lot.warehouse_id !== line.warehouseId) throw new ValidationError(`items[${line.index}].lot_id does not match the item and warehouse`);
+      } else if (item?.is_lot_tracked) {
+        throw new ValidationError(`items[${line.index}].lot_id is required for a lot-tracked item`);
+      }
+      const stock = stockBalances.get(line.key);
+      const available = stock ? Number(stock.quantity) - Number(stock.reserved_quantity) : 0;
+      const requested = (requestedByStock.get(line.key) || 0) + line.quantity;
+      if (!stock || requested > available) throw new ValidationError(`Insufficient stock for item ${line.inventoryItemId} in warehouse ${line.warehouseId}: requested ${requested}, available ${available}, shortage ${requested - available}`);
+      requestedByStock.set(line.key, requested);
+    }
+
+    for (const line of preparedLines) {
+      const stock = stockBalances.get(line.key);
+      await tx.inventory_stock.update({ where: { inventory_stock_id: stock.inventory_stock_id }, data: { quantity: { decrement: line.quantity }, last_updated_at: new Date() } });
+      await tx.production_consumption.create({ data: { production_order_id: productionOrder.production_order_id, work_order_id: workOrderId, inventory_item_id: line.inventoryItemId, lot_id: line.lotId, warehouse_id: line.warehouseId, quantity: line.quantity, remarks: line.line.remarks } });
+      await tx.stock_movement.create({ data: { inventory_item_id: line.inventoryItemId, warehouse_id: line.warehouseId, lot_id: line.lotId, movement_type: 'PRODUCTION_CONSUMPTION', reference_type: 'WORK_ORDER', reference_id: workOrderId, quantity: line.quantity, movement_date: new Date(), remarks: line.line.remarks || `Work order ${workOrder.work_order_number}` } });
+    }
+    await tx.production_order.update({ where: { production_order_id: productionOrder.production_order_id }, data: { status: 'IN_PROGRESS' } });
+    return tx.work_order.update({ where: { work_order_id: workOrderId }, data: { status: 'RUNNING' }, include: { production_order: true, production_consumption: true } });
+  });
+  res.json({ success: true, data: result });
+}
+
+async function outputProductionGoods(req, res) {
+  const workOrderId = id(req.params.id, 'id');
+  const quantity = number(req.body.quantity, 'quantity');
+  if (quantity <= 0) throw new ValidationError('quantity must be greater than zero');
+  const warehouseId = id(req.body.destination_warehouse_id ?? req.body.warehouse_id, 'warehouse_id');
+  const inventoryItemId = id(req.body.finished_item_id ?? req.body.inventory_item_id, 'inventory_item_id');
+
+  const result = await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw`SELECT "work_order_id" FROM "public"."work_order" WHERE "work_order_id" = ${workOrderId} FOR UPDATE`;
+    if (locked.length === 0) throw new NotFoundError('work order');
+    const workOrder = await tx.work_order.findUnique({ where: { work_order_id: workOrderId }, include: { production_order: { include: { inventory_item: true, factory: true, work_order: true } } } });
+    if (!workOrder) throw new NotFoundError('work order');
+    if (!['RUNNING', 'IN_PROGRESS'].includes(workOrder.status)) throw new ApiError(409, 'Output is allowed only after material consumption');
+    const productionOrder = workOrder.production_order;
+    if (!productionOrder) throw new ValidationError('Work order is not linked to a production order');
+    const consumptionCount = await tx.production_consumption.count({ where: { work_order_id: workOrderId } });
+    if (consumptionCount === 0) throw new ApiError(409, 'Output is allowed only after material consumption');
+    if (inventoryItemId !== productionOrder.inventory_item_id) throw new ValidationError('Output item must match the production order finished item');
+    if (!workOrder.planned_quantity || quantity > Number(workOrder.planned_quantity)) throw new ValidationError('Output quantity cannot exceed the work order planned quantity');
+    const previousOutput = await tx.production_output.findFirst({ where: { work_order_id: workOrderId } });
+    if (previousOutput) throw new ApiError(409, 'Work order output has already been posted');
+    const item = productionOrder.inventory_item;
+    const warehouse = await tx.warehouse.findUnique({ where: { warehouse_id: warehouseId }, select: { factory_id: true } });
+    if (!warehouse || warehouse.factory_id !== productionOrder.factory_id) throw new ValidationError('Output warehouse does not belong to the production order factory');
+    let lotId = req.body.lot_id === undefined || req.body.lot_id === null ? null : id(req.body.lot_id, 'lot_id');
+    if (item.is_lot_tracked) {
+      if (lotId) {
+        const lot = await tx.inventory_lot.findUnique({ where: { lot_id: lotId } });
+        if (!lot || lot.inventory_item_id !== inventoryItemId || lot.warehouse_id !== warehouseId) throw new ValidationError('Output lot does not match the item and warehouse');
+      } else {
+        if (!req.body.lot_number) throw new ValidationError('lot_number is required for a lot-tracked item');
+        const existing = await tx.inventory_lot.findUnique({ where: { warehouse_id_lot_number: { warehouse_id: warehouseId, lot_number: req.body.lot_number } } });
+        if (existing && existing.inventory_item_id !== inventoryItemId) throw new ValidationError('Output lot does not match the item and warehouse');
+        const lot = existing || await tx.inventory_lot.create({ data: { inventory_item_id: inventoryItemId, warehouse_id: warehouseId, lot_number: req.body.lot_number, heat_number: req.body.heat_number, quantity_received: 0, accepted_quantity: 0 } });
+        lotId = lot.lot_id;
+      }
+      await tx.inventory_lot.update({ where: { lot_id: lotId }, data: { quantity_received: { increment: quantity }, accepted_quantity: { increment: quantity } } });
+    } else if (lotId) {
+      throw new ValidationError('lot_id is not valid for a non-lot-tracked item');
+    }
+    const stock = await lockStockBalance(tx, inventoryItemId, warehouseId, lotId);
+    const updatedStock = stock
+      ? await tx.inventory_stock.update({ where: { inventory_stock_id: stock.inventory_stock_id }, data: { quantity: { increment: quantity }, last_updated_at: new Date() } })
+      : await tx.inventory_stock.create({ data: { inventory_item_id: inventoryItemId, warehouse_id: warehouseId, lot_id: lotId, quantity, reserved_quantity: 0 } });
+    await tx.stock_movement.create({ data: { inventory_item_id: inventoryItemId, warehouse_id: warehouseId, lot_id: lotId, movement_type: 'PRODUCTION_OUTPUT', reference_type: 'WORK_ORDER', reference_id: workOrderId, quantity, movement_date: new Date(), remarks: req.body.remarks || `Work order ${workOrder.work_order_number}` } });
+    await tx.production_output.create({ data: { production_order_id: productionOrder.production_order_id, work_order_id: workOrderId, inventory_item_id: inventoryItemId, lot_id: lotId, warehouse_id: warehouseId, quantity, remarks: req.body.remarks } });
+    const completedWorkOrder = await tx.work_order.update({ where: { work_order_id: workOrderId }, data: { status: 'COMPLETED', actual_quantity: { increment: quantity }, end_time: new Date() } });
+    await tx.$queryRaw`SELECT 1 FROM "public"."production_order" WHERE "production_order_id" = ${productionOrder.production_order_id} FOR UPDATE`;
+    const workOrders = await tx.work_order.findMany({ where: { production_order_id: productionOrder.production_order_id }, select: { status: true } });
+    const allComplete = workOrders.length > 0 && workOrders.every((order) => order.status === 'COMPLETED');
+    await tx.production_order.update({ where: { production_order_id: productionOrder.production_order_id }, data: { status: allComplete ? 'COMPLETED' : 'IN_PROGRESS' } });
+    return { work_order: completedWorkOrder, stock: updatedStock };
+  });
+  res.json({ success: true, data: result });
+}
+
 async function createSalesInvoice(req, res) {
   required(req.body, ['invoice_number', 'customer_id']);
   return createWithItems(req, res, 'sales_invoice', 'sales_invoice_item', 'sales_invoice_id', 'sales_invoice_item', {
@@ -350,4 +490,4 @@ async function submitApprovalAction(req, res) {
   res.status(201).json({ success: true, data: action });
 }
 
-module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, createSalesInvoice, createDocument, getDocument, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
+module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createDocument, getDocument, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
