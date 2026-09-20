@@ -460,9 +460,22 @@ async function createVendorInvoice(req, res) {
   const purchaseOrderId = req.body.purchase_order_id === undefined || req.body.purchase_order_id === null ? undefined : id(req.body.purchase_order_id, 'purchase_order_id');
   const invoiceDate = date(req.body.invoice_date);
   const dueDate = date(req.body.due_date);
+  const otherCharges = req.body.other_charges === undefined ? 0 : number(req.body.other_charges, 'other_charges');
+  const roundOff = req.body.round_off === undefined ? 0 : number(req.body.round_off, 'round_off');
+  const suppliedCessAmount = req.body.cess_amount === undefined ? 0 : number(req.body.cess_amount, 'cess_amount');
   if (Number.isNaN(invoiceDate.getTime())) throw new ValidationError('invoice_date must be a valid date');
   if (Number.isNaN(dueDate.getTime())) throw new ValidationError('due_date must be a valid date');
   if (dueDate < invoiceDate) throw new ValidationError('Due date cannot be earlier than invoice date');
+  if (otherCharges < 0) throw new ValidationError('other_charges must be greater than or equal to zero');
+  if (roundOff < -1 || roundOff > 1) throw new ValidationError('round_off must be between -1 and 1');
+  if (suppliedCessAmount < 0) throw new ValidationError('cess_amount must be greater than or equal to zero');
+  const suppliedCgstAmount = req.body.cgst_amount === undefined ? 0 : number(req.body.cgst_amount, 'cgst_amount');
+  const suppliedSgstAmount = req.body.sgst_amount === undefined ? 0 : number(req.body.sgst_amount, 'sgst_amount');
+  const suppliedIgstAmount = req.body.igst_amount === undefined ? 0 : number(req.body.igst_amount, 'igst_amount');
+  if ((suppliedCgstAmount > 0 || suppliedSgstAmount > 0) && suppliedIgstAmount > 0) throw new ValidationError('CGST/SGST and IGST cannot both apply');
+  const supplierStateCode = req.body.supplier_gstin?.slice(0, 2);
+  const recipientStateCode = req.body.recipient_gstin?.slice(0, 2);
+  const isInterState = supplierStateCode && recipientStateCode && supplierStateCode !== recipientStateCode;
 
   const result = await prisma.$transaction(async (tx) => {
     const vendor = await tx.vendor.findUnique({ where: { vendor_id: vendorId }, select: { is_active: true } });
@@ -486,6 +499,7 @@ async function createVendorInvoice(req, res) {
     let cgstAmount = 0;
     let sgstAmount = 0;
     let igstAmount = 0;
+    let cessAmount = 0;
     let totalAmount = 0;
 
     for (const [index, item] of req.body.items.entries()) {
@@ -511,13 +525,25 @@ async function createVendorInvoice(req, res) {
       if (purchaseOrderItem && unitPrice !== Number(purchaseOrderItem.unit_rate)) throw new ValidationError('Invoice rate does not match purchase order rate');
       const discount = item.discount_amount === undefined ? 0 : number(item.discount_amount, `items[${index}].discount_amount`);
       const gstRate = item.gst_rate === undefined ? 0 : number(item.gst_rate, `items[${index}].gst_rate`);
+      const cessRate = item.cess_rate === undefined ? 0 : number(item.cess_rate, `items[${index}].cess_rate`);
+      const suppliedItemCessAmount = item.cess_amount === undefined ? 0 : number(item.cess_amount, `items[${index}].cess_amount`);
+      const suppliedItemCgstAmount = item.cgst_amount === undefined ? 0 : number(item.cgst_amount, `items[${index}].cgst_amount`);
+      const suppliedItemSgstAmount = item.sgst_amount === undefined ? 0 : number(item.sgst_amount, `items[${index}].sgst_amount`);
+      const suppliedItemIgstAmount = item.igst_amount === undefined ? 0 : number(item.igst_amount, `items[${index}].igst_amount`);
       if (discount < 0) throw new ValidationError(`items[${index}].discount_amount must be greater than or equal to zero`);
-      if (gstRate < 0) throw new ValidationError(`items[${index}].gst_rate must be greater than or equal to zero`);
-      const lineTaxableAmount = roundMoney(Math.max(0, quantity * unitPrice - discount));
+      if (gstRate < 0 || gstRate > 100) throw new ValidationError(`items[${index}].gst_rate must be between 0 and 100`);
+      if (cessRate < 0) throw new ValidationError(`items[${index}].cess_rate must be greater than or equal to zero`);
+      if (suppliedItemCessAmount < 0) throw new ValidationError(`items[${index}].cess_amount must be greater than or equal to zero`);
+      if ((suppliedItemCgstAmount > 0 || suppliedItemSgstAmount > 0) && suppliedItemIgstAmount > 0) throw new ValidationError('CGST/SGST and IGST cannot both apply');
+      const taxableBeforeFloor = quantity * unitPrice - discount;
+      if (taxableBeforeFloor < 0) throw new ValidationError('taxable amount cannot be negative');
+      const lineTaxableAmount = roundMoney(taxableBeforeFloor);
       const lineTaxAmount = roundMoney(lineTaxableAmount * gstRate / 100);
-      const lineCgstAmount = roundMoney(lineTaxAmount / 2);
-      const lineSgstAmount = roundMoney(lineTaxAmount - lineCgstAmount);
-      const lineTotal = roundMoney(lineTaxableAmount + lineTaxAmount);
+      const lineCgstAmount = isInterState ? 0 : roundMoney(lineTaxAmount / 2);
+      const lineSgstAmount = isInterState ? 0 : roundMoney(lineTaxAmount - lineCgstAmount);
+      const lineIgstAmount = isInterState ? lineTaxAmount : 0;
+      const lineCessAmount = roundMoney(lineTaxableAmount * cessRate / 100);
+      const lineTotal = roundMoney(lineTaxableAmount + lineTaxAmount + lineCessAmount);
       const matches = [];
       for (const [matchIndex, match] of (Array.isArray(item.matches) ? item.matches : []).entries()) {
         const grnItemId = id(match.grn_item_id, `items[${index}].matches[${matchIndex}].grn_item_id`);
@@ -547,9 +573,12 @@ async function createVendorInvoice(req, res) {
         uom: item.uom,
         discount,
         gstRate,
+        cessRate,
         lineTaxableAmount,
         lineCgstAmount,
         lineSgstAmount,
+        lineIgstAmount,
+        lineCessAmount,
         lineTotal,
         matches
       });
@@ -557,6 +586,8 @@ async function createVendorInvoice(req, res) {
       discountAmount += discount;
       cgstAmount += lineCgstAmount;
       sgstAmount += lineSgstAmount;
+      igstAmount += lineIgstAmount;
+      cessAmount += lineCessAmount;
       totalAmount += lineTotal;
     }
 
@@ -587,11 +618,11 @@ async function createVendorInvoice(req, res) {
       cgst_amount: roundMoney(cgstAmount),
       sgst_amount: roundMoney(sgstAmount),
       igst_amount: roundMoney(igstAmount),
-      cess_amount: 0,
+      cess_amount: roundMoney(cessAmount),
       discount_amount: roundMoney(discountAmount),
-      other_charges: 0,
-      round_off: 0,
-      total_amount: roundMoney(totalAmount),
+      other_charges: roundMoney(otherCharges),
+      round_off: roundMoney(roundOff),
+      total_amount: roundMoney(totalAmount + otherCharges + roundOff),
       status: 'DRAFT'
     } });
 
@@ -610,7 +641,7 @@ async function createVendorInvoice(req, res) {
         gst_rate: item.gstRate,
         cgst_amount: item.lineCgstAmount,
         sgst_amount: item.lineSgstAmount,
-        igst_amount: 0,
+        igst_amount: item.lineIgstAmount,
         line_total: item.lineTotal
       } });
       for (const match of item.matches) {

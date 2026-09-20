@@ -424,3 +424,109 @@ test('matching keeps DRAFT status and creates no AP or accounting records', { sk
   assert.equal(await prisma.accounting_entry.count({ where: { source_type: 'VENDOR_INVOICE', source_id: invoiceId } }), 0);
   context.created.vendorInvoiceIds.push(invoiceId);
 });
+
+test('calculates intra-state CGST and SGST', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ supplier_gstin: '27ABCDE1234F1Z5', recipient_gstin: '27PQRSX5678G1Z2', items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 100, gst_rate: 18 }] }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId }, include: { vendor_invoice_item: true } });
+  assert.equal(Number(invoice.taxable_amount), 200);
+  assert.equal(Number(invoice.cgst_amount), 18);
+  assert.equal(Number(invoice.sgst_amount), 18);
+  assert.equal(Number(invoice.igst_amount), 0);
+  assert.equal(Number(invoice.total_amount), 236);
+  context.created.vendorInvoiceIds.push(invoiceId);
+});
+
+test('calculates inter-state IGST', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ supplier_gstin: '27ABCDE1234F1Z5', recipient_gstin: '29PQRSX5678G1Z8', items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 100, gst_rate: 18 }] }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } });
+  assert.equal(Number(invoice.cgst_amount), 0);
+  assert.equal(Number(invoice.sgst_amount), 0);
+  assert.equal(Number(invoice.igst_amount), 36);
+  assert.equal(Number(invoice.total_amount), 236);
+  context.created.vendorInvoiceIds.push(invoiceId);
+});
+
+test('calculates discounts, cess, other charges, and round off', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ other_charges: 5, round_off: -0.25, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 100, discount_amount: 10, gst_rate: 18, cess_rate: 1 }] }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId }, include: { vendor_invoice_item: true } });
+  assert.equal(Number(invoice.taxable_amount), 190);
+  assert.equal(Number(invoice.cgst_amount), 17.1);
+  assert.equal(Number(invoice.sgst_amount), 17.1);
+  assert.equal(Number(invoice.cess_amount), 1.9);
+  assert.equal(Number(invoice.other_charges), 5);
+  assert.equal(Number(invoice.round_off), -0.25);
+  assert.equal(Number(invoice.total_amount), 230.85);
+  assert.equal(Number(invoice.vendor_invoice_item[0].line_total), 226.1);
+  context.created.vendorInvoiceIds.push(invoiceId);
+});
+
+test('aggregates multiple item totals', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ items: [
+    { inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 10, gst_rate: 10 },
+    { inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 20, gst_rate: 5 }
+  ] }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } });
+  assert.equal(Number(invoice.taxable_amount), 50);
+  assert.equal(Number(invoice.cgst_amount), 1.5);
+  assert.equal(Number(invoice.sgst_amount), 1.5);
+  assert.equal(Number(invoice.total_amount), 53);
+  context.created.vendorInvoiceIds.push(invoiceId);
+});
+
+test('rejects invalid GST rate and negative taxable amount', { skip: !integration }, async () => {
+  for (const gstRate of [-1, 101]) {
+    const invalidGst = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 10, gst_rate: gstRate }] }));
+    assert.equal(invalidGst.status, 400);
+  }
+  const negativeTaxable = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 10, discount_amount: 11 }] }));
+  assert.equal(negativeTaxable.status, 400);
+  assert.match(negativeTaxable.body.error.message, /taxable amount cannot be negative/);
+});
+
+test('rejects invalid discount, charges, and round off', { skip: !integration }, async () => {
+  const invalidDiscount = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 10, discount_amount: -1 }] }));
+  assert.equal(invalidDiscount.status, 400);
+  const invalidCharges = await postInvoice(invoiceBody({ other_charges: -1 }));
+  assert.equal(invalidCharges.status, 400);
+  const invalidRoundOff = await postInvoice(invoiceBody({ round_off: 1.01 }));
+  assert.equal(invalidRoundOff.status, 400);
+  const invalidCess = await postInvoice(invoiceBody({ cess_amount: -1 }));
+  assert.equal(invalidCess.status, 400);
+});
+
+test('rejects conflicting CGST/SGST and IGST tax structures', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ cgst_amount: 1, igst_amount: 1 }));
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error.message, 'CGST/SGST and IGST cannot both apply');
+});
+
+test('ignores client tax and total values', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ taxable_amount: 999, cgst_amount: 999, sgst_amount: 999, igst_amount: 0, cess_amount: 999, total_amount: 9999, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 12.345, gst_rate: 18, taxable_amount: 1, line_total: 2 }] }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } });
+  assert.equal(Number(invoice.taxable_amount), 24.69);
+  assert.equal(Number(invoice.cgst_amount), 2.22);
+  assert.equal(Number(invoice.sgst_amount), 2.22);
+  assert.equal(Number(invoice.total_amount), 29.13);
+  context.created.vendorInvoiceIds.push(invoiceId);
+});
+
+test('preserves DRAFT and creates no AP, payment, or accounting records', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ other_charges: 2, round_off: 0.5 }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  assert.equal(response.body.data.status, 'DRAFT');
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 0);
+  assert.equal(await prisma.payment.count({ where: { vendor_id: BigInt(context.vendorId), payment_date: new Date('2026-01-15') } }), 0);
+  assert.equal(await prisma.accounting_entry.count({ where: { source_type: 'VENDOR_INVOICE', source_id: invoiceId } }), 0);
+  context.created.vendorInvoiceIds.push(invoiceId);
+});
