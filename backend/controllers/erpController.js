@@ -654,6 +654,49 @@ async function createVendorInvoice(req, res) {
   res.status(201).json({ success: true, data: result });
 }
 
+async function transitionVendorInvoice(req, res, status) {
+  const invoiceId = id(req.params.id, 'id');
+  const result = await prisma.$transaction(async (tx) => {
+    const invoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId }, select: { status: true } });
+    if (!invoice) throw new NotFoundError('vendor invoice');
+    if (invoice.status !== 'DRAFT') throw new ApiError(409, `Vendor invoice cannot transition from ${invoice.status} to ${status}`);
+    return tx.vendor_invoice.update({ where: { vendor_invoice_id: invoiceId }, data: { status } });
+  });
+  res.json({ success: true, status: result.status });
+}
+
+async function bookVendorInvoice(req, res) {
+  return transitionVendorInvoice(req, res, 'BOOKED');
+}
+
+async function cancelVendorInvoice(req, res) {
+  return transitionVendorInvoice(req, res, 'CANCELLED');
+}
+
+function addInvoiceMatchStatus(invoice) {
+  return { ...invoice, vendor_invoice_item: invoice.vendor_invoice_item.map((item) => {
+    const matchedQuantity = item.vendor_invoice_grn_match.reduce((total, match) => total + Number(match.matched_quantity), 0);
+    return { ...item, match_status: matchedQuantity === 0 ? 'UNMATCHED' : matchedQuantity >= Number(item.quantity) ? 'FULLY_MATCHED' : 'PARTIALLY_MATCHED' };
+  }) };
+}
+
+async function listVendorInvoices(req, res) {
+  const allowedStatuses = ['DRAFT', 'BOOKED', 'PARTIALLY_PAID', 'PAID', 'CANCELLED'];
+  const where = {};
+  if (req.query.status !== undefined) {
+    if (!allowedStatuses.includes(req.query.status)) throw new ValidationError('status must be DRAFT, BOOKED, PARTIALLY_PAID, PAID, or CANCELLED');
+    where.status = req.query.status;
+  }
+  const data = await prisma.vendor_invoice.findMany({ where, orderBy: { vendor_invoice_id: 'desc' }, select: { vendor_invoice_id: true, vendor_id: true, purchase_order_id: true, invoice_number: true, invoice_date: true, due_date: true, total_amount: true, status: true } });
+  res.json({ success: true, data });
+}
+
+async function getVendorInvoice(req, res) {
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: id(req.params.id, 'id') }, include: { vendor_invoice_item: { include: { vendor_invoice_grn_match: true } } } });
+  if (!invoice) throw new NotFoundError('vendor invoice');
+  res.json({ success: true, data: addInvoiceMatchStatus(invoice) });
+}
+
 async function createDocument(req, res) {
   required(req.body, ['document_type', 'file_name']);
   const result = await prisma.$transaction(async (tx) => {
@@ -702,4 +745,4 @@ async function submitApprovalAction(req, res) {
   res.status(201).json({ success: true, data: action });
 }
 
-module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createVendorInvoice, createDocument, getDocument, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
+module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createVendorInvoice, bookVendorInvoice, cancelVendorInvoice, listVendorInvoices, getVendorInvoice, createDocument, getDocument, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };

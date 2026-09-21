@@ -530,3 +530,81 @@ test('preserves DRAFT and creates no AP, payment, or accounting records', { skip
   assert.equal(await prisma.accounting_entry.count({ where: { source_type: 'VENDOR_INVOICE', source_id: invoiceId } }), 0);
   context.created.vendorInvoiceIds.push(invoiceId);
 });
+
+async function createLifecycleInvoice() {
+  const response = await postInvoice(invoiceBody());
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  context.created.vendorInvoiceIds.push(invoiceId);
+  return invoiceId;
+}
+
+async function lifecycleRequest(invoiceId, action) {
+  return request(app).post(`/api/procurement/vendor-invoices/${invoiceId}/${action}`).set('Authorization', context.auth).send({});
+}
+
+test('books a draft invoice', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  const response = await lifecycleRequest(invoiceId, 'book');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.status, 'BOOKED');
+});
+
+test('cancels a draft invoice', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  const response = await lifecycleRequest(invoiceId, 'cancel');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.status, 'CANCELLED');
+});
+
+test('rejects booking and cancellation after terminal transitions', { skip: !integration }, async () => {
+  const bookedId = await createLifecycleInvoice();
+  assert.equal((await lifecycleRequest(bookedId, 'book')).status, 200);
+  assert.equal((await lifecycleRequest(bookedId, 'book')).status, 409);
+  assert.equal((await lifecycleRequest(bookedId, 'cancel')).status, 409);
+
+  const cancelledId = await createLifecycleInvoice();
+  assert.equal((await lifecycleRequest(cancelledId, 'cancel')).status, 200);
+  assert.equal((await lifecycleRequest(cancelledId, 'book')).status, 409);
+  assert.equal((await lifecycleRequest(cancelledId, 'cancel')).status, 409);
+});
+
+test('booking creates no AP, payment, or accounting records', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  assert.equal((await lifecycleRequest(invoiceId, 'book')).status, 200);
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 0);
+  assert.equal(await prisma.payment.count({ where: { vendor_id: BigInt(context.vendorId) } }), 0);
+  assert.equal(await prisma.accounting_entry.count({ where: { source_type: 'VENDOR_INVOICE', source_id: invoiceId } }), 0);
+});
+
+test('lists invoices and filters by status', { skip: !integration }, async () => {
+  const draftId = await createLifecycleInvoice();
+  const bookedId = await createLifecycleInvoice();
+  assert.equal((await lifecycleRequest(bookedId, 'book')).status, 200);
+  const all = await request(app).get('/api/procurement/vendor-invoices').set('Authorization', context.auth);
+  assert.equal(all.status, 200);
+  assert.ok(all.body.data.some((invoice) => invoice.vendor_invoice_id === draftId.toString()));
+  const filtered = await request(app).get('/api/procurement/vendor-invoices?status=BOOKED').set('Authorization', context.auth);
+  assert.equal(filtered.status, 200);
+  assert.ok(filtered.body.data.some((invoice) => invoice.vendor_invoice_id === bookedId.toString()));
+  assert.ok(filtered.body.data.every((invoice) => invoice.status === 'BOOKED'));
+});
+
+test('retrieves an invoice with items and GRN matches', { skip: !integration }, async () => {
+  const grn = await createAcceptedGrn({ quantity: 2 });
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 12.5, matches: [{ grn_item_id: grn.grnItemId, matched_quantity: 2 }] }] }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  context.created.vendorInvoiceIds.push(invoiceId);
+  const detail = await request(app).get(`/api/procurement/vendor-invoices/${invoiceId}`).set('Authorization', context.auth);
+  assert.equal(detail.status, 200);
+  assert.equal(detail.body.data.vendor_invoice_item.length, 1);
+  assert.equal(detail.body.data.vendor_invoice_item[0].vendor_invoice_grn_match.length, 1);
+  assert.equal(detail.body.data.vendor_invoice_item[0].match_status, 'FULLY_MATCHED');
+});
+
+test('has no invoice update or delete routes', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  assert.equal((await request(app).patch(`/api/procurement/vendor-invoices/${invoiceId}`).set('Authorization', context.auth).send({ status: 'BOOKED' })).status, 404);
+  assert.equal((await request(app).delete(`/api/procurement/vendor-invoices/${invoiceId}`).set('Authorization', context.auth)).status, 404);
+});
