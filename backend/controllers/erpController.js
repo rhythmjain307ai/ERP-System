@@ -120,6 +120,28 @@ async function listInventoryStocks(req, res) {
   res.json({ success: true, data, meta: { page, pageSize, total, pageCount: Math.ceil(total / pageSize) } });
 }
 
+async function listInventoryMovements(req, res) {
+  const { page, pageSize } = pageQuery(req);
+  const where = {};
+  if (req.query.movement_type) where.movement_type = req.query.movement_type;
+  if (req.query.item_id) where.inventory_item_id = id(req.query.item_id, 'item_id');
+  if (req.query.warehouse_id) where.warehouse_id = id(req.query.warehouse_id, 'warehouse_id');
+  if (req.query.search) where.OR = [
+    { movement_type: { contains: req.query.search, mode: 'insensitive' } },
+    { reference_type: { contains: req.query.search, mode: 'insensitive' } },
+    { remarks: { contains: req.query.search, mode: 'insensitive' } },
+    { inventory_item: { item_name: { contains: req.query.search, mode: 'insensitive' } } },
+    { inventory_item: { item_code: { contains: req.query.search, mode: 'insensitive' } } },
+    { warehouse: { warehouse_name: { contains: req.query.search, mode: 'insensitive' } } }
+  ];
+  const include = { inventory_item: true, warehouse: true, inventory_lot: true };
+  const [data, total] = await prisma.$transaction([
+    prisma.stock_movement.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, orderBy: { movement_date: 'desc' }, include }),
+    prisma.stock_movement.count({ where })
+  ]);
+  res.json({ success: true, data, meta: { page, pageSize, total, pageCount: Math.ceil(total / pageSize) } });
+}
+
 async function createGrn(req, res) {
   required(req.body, ['grn_number', 'vendor_id', 'warehouse_id']);
   if (req.body.purchase_order_id !== undefined && (!Array.isArray(req.body.items) || req.body.items.some((item) => item.purchase_order_item_id === undefined || item.purchase_order_item_id === null))) throw new ValidationError('PO-linked GRN items must reference a purchase order item');
@@ -258,11 +280,68 @@ async function createCustomerOrder(req, res) {
   }, (parent, item) => ({ customer_order_id: parent.customer_order_id, inventory_item_id: id(item.inventory_item_id, 'inventory_item_id'), description: item.description, hsn_sac_code: item.hsn_sac_code, uom: item.uom, ordered_quantity: number(item.ordered_quantity ?? item.quantity, 'ordered_quantity'), unit_rate: item.unit_rate === undefined ? undefined : number(item.unit_rate, 'unit_rate'), gst_rate: item.gst_rate === undefined ? undefined : number(item.gst_rate, 'gst_rate'), line_amount: item.line_amount === undefined ? undefined : number(item.line_amount, 'line_amount') }));
 }
 
+async function listCustomerOrders(req, res) {
+  const { page, pageSize } = pageQuery(req);
+  const where = {};
+  if (req.query.status) where.status = req.query.status;
+  if (req.query.search) where.OR = [{ order_number: { contains: req.query.search, mode: 'insensitive' } }, { customer: { customer_name: { contains: req.query.search, mode: 'insensitive' } } }];
+  const include = { customer: true, customer_order_item: { include: { inventory_item: true, delivery_item: { include: { delivery: { select: { delivery_id: true, delivery_number: true, status: true } } } } } } };
+  const [data, total] = await prisma.$transaction([
+    prisma.customer_order.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, orderBy: { customer_order_id: 'desc' }, include }),
+    prisma.customer_order.count({ where })
+  ]);
+  res.json({ success: true, data, meta: { page, pageSize, total, pageCount: Math.ceil(total / pageSize) } });
+}
+
+async function getCustomerOrder(req, res) {
+  const data = await prisma.customer_order.findUnique({ where: { customer_order_id: id(req.params.id, 'id') }, include: { customer: true, customer_order_item: { include: { inventory_item: true, delivery_item: { include: { delivery: true } } } }, delivery: { include: { warehouse: true, delivery_item: { include: { inventory_item: true, inventory_lot: true } } } } } });
+  if (!data) throw new NotFoundError('customer order');
+  res.json({ success: true, data });
+}
+
+async function listSalesInvoices(req, res) {
+  const { page, pageSize } = pageQuery(req);
+  const where = {};
+  if (req.query.status) where.status = req.query.status;
+  if (req.query.search) where.OR = [{ invoice_number: { contains: req.query.search, mode: 'insensitive' } }, { customer: { customer_name: { contains: req.query.search, mode: 'insensitive' } } }];
+  const include = { customer: true, customer_order: { select: { customer_order_id: true, order_number: true } }, sales_invoice_item: { include: { inventory_item: true, delivery_item: { include: { delivery: { select: { delivery_id: true, delivery_number: true, status: true } } } } } } };
+  const [data, total] = await prisma.$transaction([
+    prisma.sales_invoice.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, orderBy: { sales_invoice_id: 'desc' }, include }),
+    prisma.sales_invoice.count({ where })
+  ]);
+  res.json({ success: true, data, meta: { page, pageSize, total, pageCount: Math.ceil(total / pageSize) } });
+}
+
+async function getSalesInvoice(req, res) {
+  const data = await prisma.sales_invoice.findUnique({ where: { sales_invoice_id: id(req.params.id, 'id') }, include: { customer: true, customer_order: true, sales_invoice_item: { include: { inventory_item: true, delivery_item: { include: { delivery: true } } } }, delivery: { include: { warehouse: true, delivery_item: { include: { inventory_item: true, inventory_lot: true } } } } } });
+  if (!data) throw new NotFoundError('sales invoice');
+  res.json({ success: true, data });
+}
+
 async function createDelivery(req, res) {
   required(req.body, ['delivery_number', 'customer_id']);
   return createWithItems(req, res, 'delivery', 'delivery_item', 'delivery_id', 'delivery_item', {
     delivery_number: req.body.delivery_number, customer_id: id(req.body.customer_id, 'customer_id'), customer_order_id: req.body.customer_order_id === undefined ? undefined : id(req.body.customer_order_id, 'customer_order_id'), sales_invoice_id: req.body.sales_invoice_id === undefined ? undefined : id(req.body.sales_invoice_id, 'sales_invoice_id'), warehouse_id: req.body.warehouse_id === undefined ? undefined : id(req.body.warehouse_id, 'warehouse_id'), delivery_date: date(req.body.delivery_date), status: 'DRAFT', remarks: req.body.remarks
   }, (parent, item) => ({ delivery_id: parent.delivery_id, customer_order_item_id: item.customer_order_item_id === undefined ? undefined : id(item.customer_order_item_id, 'customer_order_item_id'), sales_invoice_item_id: item.sales_invoice_item_id === undefined ? undefined : id(item.sales_invoice_item_id, 'sales_invoice_item_id'), inventory_item_id: id(item.inventory_item_id, 'inventory_item_id'), lot_id: item.lot_id === undefined ? undefined : id(item.lot_id, 'lot_id'), description: item.description, uom: item.uom, ordered_quantity: item.ordered_quantity === undefined ? undefined : number(item.ordered_quantity, 'ordered_quantity'), delivered_quantity: number(item.delivered_quantity ?? item.quantity, 'delivered_quantity'), weight_kg: item.weight_kg === undefined ? undefined : number(item.weight_kg, 'weight_kg'), remarks: item.remarks }));
+}
+
+async function listDeliveries(req, res) {
+  const { page, pageSize } = pageQuery(req);
+  const where = {};
+  if (req.query.status) where.status = req.query.status;
+  if (req.query.search) where.OR = [{ delivery_number: { contains: req.query.search, mode: 'insensitive' } }, { customer: { customer_name: { contains: req.query.search, mode: 'insensitive' } } }];
+  const include = { customer: true, warehouse: true, customer_order: { select: { customer_order_id: true, order_number: true } }, sales_invoice: { select: { sales_invoice_id: true, invoice_number: true } }, delivery_item: { include: { inventory_item: true, inventory_lot: true } } };
+  const [data, total] = await prisma.$transaction([
+    prisma.delivery.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, orderBy: { delivery_id: 'desc' }, include }),
+    prisma.delivery.count({ where })
+  ]);
+  res.json({ success: true, data, meta: { page, pageSize, total, pageCount: Math.ceil(total / pageSize) } });
+}
+
+async function getDelivery(req, res) {
+  const data = await prisma.delivery.findUnique({ where: { delivery_id: id(req.params.id, 'id') }, include: { customer: true, warehouse: true, customer_order: { include: { customer_order_item: { include: { inventory_item: true } } } }, sales_invoice: { include: { sales_invoice_item: { include: { inventory_item: true } } } }, delivery_item: { include: { inventory_item: true, inventory_lot: true, customer_order_item: true, sales_invoice_item: true } } } });
+  if (!data) throw new NotFoundError('delivery');
+  res.json({ success: true, data });
 }
 
 async function dispatchDelivery(req, res) {
@@ -872,4 +951,4 @@ async function submitApprovalAction(req, res) {
   res.status(201).json({ success: true, data: action });
 }
 
-module.exports = { createRequisition, createPurchaseOrder, listPurchaseOrders, getPurchaseOrder, createGrn, listGrns, getGrn, postGrn, listInventoryStocks, createCustomerOrder, createDelivery, dispatchDelivery, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createVendorInvoice, bookVendorInvoice, cancelVendorInvoice, listVendorInvoices, getVendorInvoice, createDocument, uploadDocument, retryDocument, listDocuments, getDocument, getDocumentFile, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
+module.exports = { createRequisition, createPurchaseOrder, listPurchaseOrders, getPurchaseOrder, createGrn, listGrns, getGrn, postGrn, listInventoryStocks, listInventoryMovements, createCustomerOrder, listCustomerOrders, getCustomerOrder, createDelivery, listDeliveries, getDelivery, dispatchDelivery, listSalesInvoices, getSalesInvoice, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createVendorInvoice, bookVendorInvoice, cancelVendorInvoice, listVendorInvoices, getVendorInvoice, createDocument, uploadDocument, retryDocument, listDocuments, getDocument, getDocumentFile, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
