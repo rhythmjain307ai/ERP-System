@@ -229,11 +229,9 @@
         <div class="search-row">
           <label class="search-box">
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-            <input placeholder="Search PDFs, approvals, OCR text" aria-label="Search documents">
+            <input id="documentSearch" placeholder="Search invoices, vendors, or OCR text" aria-label="Search documents">
           </label>
-          <button class="filter-btn" type="button" data-filter aria-label="Document filters">
-            <svg viewBox="0 0 24 24"><path d="M4 7h16M7 12h10M10 17h4"/></svg>
-          </button>
+          <select id="documentStatus" class="document-select" aria-label="Document status"><option value="">All status</option><option>PROCESSED</option><option>NEEDS_REVIEW</option><option>PROCESSING</option><option>FAILED</option><option>APPROVED</option><option>REJECTED</option></select>
         </div>
         <div class="scanner-card">
           <div class="scan-frame">
@@ -244,23 +242,16 @@
             <h3>Upload PDF or scan purchase bills</h3>
             <small>OCR extracts GST, vendor, line items, and totals for review.</small>
           </div>
-          <button class="primary-btn small" type="button" data-toast="OCR processing started">Scan</button>
+          <button class="primary-btn small" id="documentUploadButton" type="button">Scan / Upload</button>
+          <input id="documentFileInput" type="file" accept="image/jpeg,image/png,application/pdf" hidden>
         </div>
-        <section class="panel">
-          <div class="section-head">
-            <h3>Approval Workflow</h3>
-            <span class="status-pill warn">5 waiting</span>
-          </div>
-          <div class="activity-list">
-            <article><span class="doc-badge">PDF</span><div><strong>Vendor Bill VB-8821</strong><small>OCR 96% · Needs account code</small></div><button class="mini-btn" data-toast="Document approved">Approve</button></article>
-            <article><span class="doc-badge">PO</span><div><strong>Purchase Order PO-4109</strong><small>Manager review · ₹8.4L</small></div><button class="mini-btn" data-toast="Sent for approval">Route</button></article>
-            <article><span class="doc-badge">INV</span><div><strong>Invoice INV-2051</strong><small>PDF preview generated</small></div><button class="mini-btn" data-toast="PDF preview opened">Preview</button></article>
-          </div>
+        <p class="document-help">JPG, PNG, or PDF · maximum 10 MB · uncertain OCR always requires review.</p>
+        <div id="documentAuth" class="document-auth" hidden></div>
+        <section class="panel document-panel">
+          <div class="section-head"><h3>Documents</h3><span id="documentCount" class="status-pill">0</span></div>
+          <div id="documentList" class="document-list"><p class="empty-copy">Connect your ERP session to load documents.</p></div>
         </section>
-        <div class="state-row">
-          <article class="state-card skeleton"><span></span><b></b><small></small></article>
-          <article class="state-card empty"><strong>No rejected files</strong><small>Rejected documents will appear here.</small></article>
-        </div>
+        <section id="documentDetail" class="document-detail" hidden></section>
       </section>
 
       <section class="content-view" data-view="analytics">
@@ -354,5 +345,6 @@
   </section>
 </main>
 <script src="app.js"></script>
+<script src="documents.js"></script>
 </body>
 </html>

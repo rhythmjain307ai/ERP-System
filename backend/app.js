@@ -1,10 +1,12 @@
 const express = require('express');
+const path = require('path');
 const serialize = require('./lib/serialize');
 const errorHandler = require('./middleware/errors');
 const { createRoutes } = require('./routes/moduleRoutes');
 
 const app = express();
 app.use(express.json());
+app.use(express.static(path.resolve(__dirname, '..', 'app')));
 app.use((req, res, next) => {
   const json = res.json.bind(res);
   res.json = (body) => json(serialize(body));
@@ -24,6 +26,7 @@ app.use('/api/customers', routes.customers);
 app.use('/api/vendors', routes.vendors);
 
 app.get('/health', (req, res) => res.json({ ok: true }));
+app.get('/api/session-config', (req, res) => res.json({ developmentTokenFallback: process.env.NODE_ENV === 'development' }));
 
 app.use((req, res) => res.status(404).json({ success: false, error: { message: 'Route not found' } }));
 app.use(errorHandler);

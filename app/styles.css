@@ -951,6 +951,62 @@ h3 {
   transform: translateY(0);
 }
 
+.document-select {
+  max-width: 118px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  color: var(--muted);
+  background: #fff;
+  font-size: 12px;
+}
+
+.document-help,
+.empty-copy {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.document-help { margin: 10px 3px; }
+.document-panel { padding: 16px; }
+.document-list { display: grid; gap: 8px; }
+.document-row {
+  display: grid;
+  grid-template-columns: 38px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 11px 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+}
+.document-row:last-child { border-bottom: 0; }
+.document-row strong, .document-row small, .document-status { display: block; }
+.document-row small, .document-status small { margin-top: 3px; color: var(--muted); font-size: 11px; }
+.document-status { color: var(--warning); font-size: 10px; font-weight: 800; text-align: right; }
+.document-status.processed, .document-status.approved { color: var(--success); }
+.document-status.failed, .document-status.rejected { color: var(--danger); }
+.document-auth, .document-detail { margin-top: 12px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; box-shadow: var(--shadow); }
+.document-auth small { display: block; margin: 5px 0 10px; color: var(--muted); font-size: 12px; }
+.document-auth div { display: flex; gap: 8px; }
+.document-auth input { min-width: 0; flex: 1; padding: 9px; border: 1px solid var(--line); border-radius: 10px; }
+.detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.document-split { display: grid; gap: 14px; }
+.document-preview { display: block; width: 100%; min-height: 240px; max-height: 370px; border: 1px solid var(--line); border-radius: 12px; object-fit: contain; background: var(--soft); }
+.document-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.document-form label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; font-weight: 700; }
+.document-form input, .document-form textarea { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
+.document-form textarea, .document-form label:last-of-type, .validation-warning, .review-actions { grid-column: 1 / -1; }
+.validation-warning { padding: 10px; border-radius: 10px; color: #92400e; background: #fffbeb; font-size: 12px; }
+.validation-warning ul { margin: 6px 0 0; padding-left: 18px; }
+.review-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.approve { color: #fff; background: var(--success); }
+.reject { color: #fff; background: var(--danger); }
+
 @media (max-width: 390px) {
   .app-shell {
     padding: 0;
@@ -988,5 +1044,36 @@ h3 {
 
 @keyframes grow {
   from { height: 20px; }
+}
+
+/* Use document scrolling rather than a fixed-height phone viewport. */
+body { display: block; }
+.app-shell { width: 100%; max-width: 1600px; margin: auto; padding: 16px; }
+.phone-frame { height: auto; min-height: calc(100vh - 32px); overflow: visible; border-radius: 20px; }
+.status-bar { display: none; }
+.screen { position: static; }
+.main-screen { overflow: visible; padding: 0 24px 110px; }
+.auth-screen { max-width: 540px; margin: auto; }
+.top-app-bar { position: sticky; top: 0; z-index: 10; background: white; padding: 20px 0; }
+.bottom-nav { position: fixed; left: 16px; right: 16px; bottom: 0; width: auto; }
+.fab { position: fixed; }
+.document-split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+.document-preview { height: 70vh; max-height: none; }
+.document-detail [hidden], [hidden] { display: none !important; }
+.document-form .wide { grid-column: 1 / -1; }
+.document-form textarea { min-height: 90px; }
+.line-items { overflow-x: auto; grid-column: 1 / -1; }
+.line-items table { width: 100%; border-collapse: collapse; }
+.line-items th, .line-items td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); }
+.ocr-progress { padding: 14px; color: var(--primary); }
+.raw-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.document-filters { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+@media (max-width: 700px) {
+  .app-shell { padding: 0; }
+  .phone-frame { height: auto; min-height: 100vh; border-radius: 0; }
+  .main-screen { padding: 0 14px 110px; }
+  .bottom-nav { left: 0; right: 0; }
+  .document-split { grid-template-columns: 1fr; }
+  .document-preview { height: 50vh; }
 }
 
