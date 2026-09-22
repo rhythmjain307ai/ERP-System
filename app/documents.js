@@ -17,7 +17,7 @@ async function api(path, options = {}) {
   const response = await fetch(`/api/documents${path}`, { ...options, headers: { ...(token() ? { Authorization: `Bearer ${token()}` } : {}), ...options.headers } });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    const error = new Error(body.error?.message || 'Document request failed'); error.status = response.status; throw error;
+    const error = new Error(body.error?.message || 'Document request failed'); error.status = response.status; error.details = body.error?.details; throw error;
   }
   return options.blob ? response.blob() : response.json();
 }
@@ -63,7 +63,10 @@ async function openDocument(id) {
         for (const key of ['subtotal','taxableAmount','cgst','sgst','igst','discount','roundOff','total']) { const value = form.get(key).trim(); if (value && !Number.isFinite(Number(value))) throw new Error(`${key} must be numeric.`); corrected.amounts[key] = value ? Number(value) : null; }
         await api(`/reviews/${review.invoice_extraction_review_id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ extracted_fields: corrected, reviewer_decision: decision === 'SAVE' ? 'NEEDS_CORRECTION' : decision, review_notes: form.get('notes') }) });
         await openDocument(id); await loadDocuments();
-      } catch (error) { document.getElementById('reviewMessage').textContent = error.message; }
+      } catch (error) {
+        const validationErrors = error.details?.validationErrors;
+        document.getElementById('reviewMessage').textContent = validationErrors?.length ? `${error.message} ${validationErrors.join(' ')}` : error.message;
+      }
     };
     try {
       const blob = await api(`/${id}/file`, { blob: true }); docs.preview = URL.createObjectURL(blob);
