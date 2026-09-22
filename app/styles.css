@@ -1046,3 +1046,34 @@ h3 {
   from { height: 20px; }
 }
 
+/* Use document scrolling rather than a fixed-height phone viewport. */
+body { display: block; }
+.app-shell { width: 100%; max-width: 1600px; margin: auto; padding: 16px; }
+.phone-frame { height: auto; min-height: calc(100vh - 32px); overflow: visible; border-radius: 20px; }
+.status-bar { display: none; }
+.screen { position: static; }
+.main-screen { overflow: visible; padding: 0 24px 110px; }
+.auth-screen { max-width: 540px; margin: auto; }
+.top-app-bar { position: sticky; top: 0; z-index: 10; background: white; padding: 20px 0; }
+.bottom-nav { position: fixed; left: 16px; right: 16px; bottom: 0; width: auto; }
+.fab { position: fixed; }
+.document-split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; }
+.document-preview { height: 70vh; max-height: none; }
+.document-detail [hidden], [hidden] { display: none !important; }
+.document-form .wide { grid-column: 1 / -1; }
+.document-form textarea { min-height: 90px; }
+.line-items { overflow-x: auto; grid-column: 1 / -1; }
+.line-items table { width: 100%; border-collapse: collapse; }
+.line-items th, .line-items td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); }
+.ocr-progress { padding: 14px; color: var(--primary); }
+.raw-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.document-filters { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+@media (max-width: 700px) {
+  .app-shell { padding: 0; }
+  .phone-frame { height: auto; min-height: 100vh; border-radius: 0; }
+  .main-screen { padding: 0 14px 110px; }
+  .bottom-nav { left: 0; right: 0; }
+  .document-split { grid-template-columns: 1fr; }
+  .document-preview { height: 50vh; }
+}
+

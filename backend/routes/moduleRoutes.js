@@ -52,6 +52,7 @@ function createRoutes() {
   const production = express.Router(); production.post('/work-orders/:id/consume', requireAuth, requirePermission('inventory.write'), asyncHandler(workflow.consumeProductionMaterials)); production.post('/work-orders/:id/output', requireAuth, requirePermission('inventory.write'), asyncHandler(workflow.outputProductionGoods));
   const documents = express.Router();
   documents.post('/upload', requireAuth, requirePermission('documents.write'), documentUpload, asyncHandler(workflow.uploadDocument));
+  documents.post('/:id/retry', requireAuth, requirePermission('documents.write'), asyncHandler(workflow.retryDocument));
   documents.get('/', requireAuth, asyncHandler(workflow.listDocuments));
   documents.get('/reviews/:id', requireAuth, requirePermission('documents.review'), asyncHandler(workflow.getReview));
   documents.patch('/reviews/:id', requireAuth, requirePermission('documents.review'), asyncHandler(workflow.updateReview));

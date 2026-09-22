@@ -19,6 +19,7 @@ function errorHandler(error, req, res, next) {
     console.error(error);
   }
 
+  if (status >= 500) { message = 'The server could not complete this request. Please retry or contact the administrator.'; details = undefined; }
   res.status(status).json({ success: false, error: { message, ...(details ? { details } : {}) } });
 }
 

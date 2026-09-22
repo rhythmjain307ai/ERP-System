@@ -26,6 +26,7 @@ app.use('/api/customers', routes.customers);
 app.use('/api/vendors', routes.vendors);
 
 app.get('/health', (req, res) => res.json({ ok: true }));
+app.get('/api/session-config', (req, res) => res.json({ developmentTokenFallback: process.env.NODE_ENV === 'development' }));
 
 app.use((req, res) => res.status(404).json({ success: false, error: { message: 'Route not found' } }));
 app.use(errorHandler);

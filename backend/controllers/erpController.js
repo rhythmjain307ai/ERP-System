@@ -1,8 +1,8 @@
 const prisma = require('../lib/prisma');
 const fs = require('fs/promises');
 const path = require('path');
-const { extractText } = require('../lib/ocr/ocrService');
-const { extractInvoice } = require('../lib/ocr/invoiceExtractor');
+const { processDocument } = require('../lib/ocr/documentProcessor');
+const { databaseStatus, publicReview, publicDocument } = require('../lib/ocr/documentContract');
 const { validateInvoice } = require('../lib/ocr/invoiceValidator');
 const { uploadDirectory, verifyUploadedFile } = require('../middleware/upload');
 const { ApiError, NotFoundError, ValidationError } = require('../lib/errors');
@@ -714,74 +714,46 @@ async function createDocument(req, res) {
   res.status(201).json({ success: true, data: result });
 }
 
-function publicDocument(document) {
-  return { ...document, file_url: `/api/documents/${document.document_id}/file` };
-}
-
 async function listDocuments(req, res) {
-  const page = Math.max(1, Number(req.query.page) || 1);
-  const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 25));
-  const documents = await prisma.document.findMany({
-    where: {
-      ...(req.query.documentType ? { document_type: req.query.documentType } : {}),
-      ...(req.query.from || req.query.to ? { uploaded_at: { ...(req.query.from ? { gte: new Date(req.query.from) } : {}), ...(req.query.to ? { lte: new Date(`${req.query.to}T23:59:59.999Z`) } : {}) } } : {})
-    },
-    include: { invoice_extraction_review: true },
-    orderBy: { uploaded_at: 'desc' }
-  });
+  const page = Math.max(1, Math.floor(Number(req.query.page) || 1));
+  const pageSize = Math.min(100, Math.max(1, Math.floor(Number(req.query.pageSize) || 25)));
+  const documents = await prisma.document.findMany({ include: { invoice_extraction_review: true }, orderBy: { uploaded_at: 'desc' } });
   const search = String(req.query.search || '').trim().toLowerCase();
-  const filtered = documents.filter((document) => {
-    const review = document.invoice_extraction_review;
-    if (req.query.status && review?.extraction_status !== req.query.status) return false;
-    if (!search) return true;
-    return [document.file_name, document.document_type, JSON.stringify(review?.extracted_fields || {}), JSON.stringify(review?.raw_ocr_output || {})].join(' ').toLowerCase().includes(search);
+  const filtered = documents.map(publicDocument).filter(document => {
+    if (req.query.status && document.invoice_extraction_review?.extraction_status !== req.query.status) return false;
+    if (req.query.documentType && document.document_type !== req.query.documentType) return false;
+    const day = document.uploaded_at.toISOString().slice(0, 10);
+    if (req.query.from && day < req.query.from || req.query.to && day > req.query.to) return false;
+    return !search || JSON.stringify(require('../lib/serialize')(document)).toLowerCase().includes(search);
   });
-  res.json({ success: true, data: filtered.slice((page - 1) * pageSize, page * pageSize).map(publicDocument), pagination: { page, pageSize, total: filtered.length } });
+  res.json({ success: true, data: filtered.slice((page - 1) * pageSize, page * pageSize), pagination: { page, pageSize, total: filtered.length } });
 }
 
 async function uploadDocument(req, res) {
   if (!req.file) throw new ValidationError('A document file is required.');
   await verifyUploadedFile(req.file);
-  const documentType = req.body.document_type || 'PURCHASE_INVOICE';
-  const document = await prisma.document.create({
-    data: {
-      document_type: documentType,
-      file_name: req.file.filename,
-      mime_type: req.file.mimetype,
-      uploaded_by: req.user.user_id,
-      metadata: { originalFileName: path.basename(req.file.originalname), size: req.file.size }
-    }
-  });
-  const review = await prisma.invoice_extraction_review.create({ data: { document_id: document.document_id, extraction_status: 'PROCESSING' } });
-  console.info('Document uploaded', { documentId: document.document_id.toString(), mimeType: req.file.mimetype, size: req.file.size });
+  let document;
   try {
-    const ocr = await extractText(req.file.path, req.file.mimetype);
-    const extracted = extractInvoice(ocr.text);
-    const validation = validateInvoice(extracted, ocr.confidence);
-    const duplicate = await findLikelyDuplicate(document.document_id, extracted);
-    if (duplicate) validation.errors.push(`Possible duplicate of document ${duplicate.document_id.toString()}; verify before approval.`);
-    if (duplicate) validation.status = 'NEEDS_REVIEW';
-    const updatedReview = await prisma.invoice_extraction_review.update({
-      where: { invoice_extraction_review_id: review.invoice_extraction_review_id },
-      data: { extraction_status: validation.status, extraction_engine: ocr.engine, extraction_version: ocr.version, raw_ocr_output: { text: ocr.text, confidence: ocr.confidence }, extracted_fields: extracted, confidence_score: validation.confidence, validation_errors: validation.errors, updated_at: new Date() }
-    });
-    res.status(201).json({ success: true, data: publicDocument({ ...document, invoice_extraction_review: updatedReview }) });
-  } catch (error) {
-    const message = error instanceof ValidationError ? error.message : 'OCR processing failed. The original file was saved and needs manual review.';
-    console.error('OCR failure', { documentId: document.document_id.toString(), message: error.message });
-    const updatedReview = await prisma.invoice_extraction_review.update({
-      where: { invoice_extraction_review_id: review.invoice_extraction_review_id },
-      data: { extraction_status: error instanceof ValidationError ? 'NEEDS_REVIEW' : 'FAILED', validation_errors: [message], updated_at: new Date() }
-    });
-    res.status(201).json({ success: true, data: publicDocument({ ...document, invoice_extraction_review: updatedReview }) });
-  }
+    document = await prisma.document.create({ data: {
+      document_type: req.body.document_type || 'PURCHASE_INVOICE', file_name: req.file.filename,
+      mime_type: req.file.mimetype, uploaded_by: req.user.user_id,
+      metadata: { originalFileName: path.basename(req.file.originalname), size: req.file.size },
+      invoice_extraction_review: { create: { extraction_status: 'PROCESSING' } }
+    } });
+  } catch (error) { await fs.unlink(req.file.path).catch(() => {}); throw error; }
+  const result = await processDocument(prisma, document, req.file.path);
+  res.status(201).json({ success: true, data: publicDocument(result) });
 }
 
-async function findLikelyDuplicate(documentId, extracted) {
-  if (!extracted.invoiceNumber || !extracted.vendor?.name || extracted.amounts?.total === null) return null;
-  const reviews = await prisma.invoice_extraction_review.findMany({ where: { document_id: { not: documentId } }, include: { document: true }, orderBy: { created_at: 'desc' }, take: 200 });
-  return reviews.map((review) => ({ ...review.document, extracted: review.extracted_fields }))
-    .find((candidate) => candidate.extracted?.invoiceNumber === extracted.invoiceNumber && String(candidate.extracted?.vendor?.name || '').toLowerCase() === extracted.vendor.name.toLowerCase() && Number(candidate.extracted?.amounts?.total) === Number(extracted.amounts.total)) || null;
+async function retryDocument(req, res) {
+  const document = await prisma.document.findUnique({ where: { document_id: id(req.params.id) }, include: { invoice_extraction_review: true } });
+  if (!document) throw new NotFoundError('document');
+  if (!['UNDER_REVIEW', 'VALIDATION_FAILED'].includes(document.invoice_extraction_review?.extraction_status)) throw new ApiError(409, 'Only failed or needs-review documents can be retried.');
+  if (document.invoice_extraction_review.reviewed_at) throw new ApiError(409, 'This document has human corrections. Upload a new copy to avoid overwriting them.');
+  const claimed = await prisma.invoice_extraction_review.updateMany({ where: { document_id: document.document_id, extraction_status: { in: ['UNDER_REVIEW', 'VALIDATION_FAILED'] }, reviewed_at: null }, data: { extraction_status: 'PROCESSING' } });
+  if (!claimed.count) throw new ApiError(409, 'Document is already being processed.');
+  const result = await processDocument(prisma, document, path.join(uploadDirectory, path.basename(document.file_name)));
+  res.json({ success: true, data: publicDocument(result) });
 }
 
 async function getDocument(req, res) {
@@ -808,7 +780,7 @@ async function updateDocument(req, res) {
 async function getReview(req, res) {
   const review = await prisma.invoice_extraction_review.findUnique({ where: { invoice_extraction_review_id: id(req.params.id) } });
   if (!review) throw new NotFoundError('invoice extraction review');
-  res.json({ success: true, data: review });
+  res.json({ success: true, data: publicReview(review) });
 }
 
 async function updateReview(req, res) {
@@ -816,12 +788,14 @@ async function updateReview(req, res) {
   if (!existing) throw new NotFoundError('invoice extraction review');
   const decision = req.body.reviewer_decision;
   const fields = req.body.extracted_fields === undefined ? existing.extracted_fields : req.body.extracted_fields;
-  const validation = fields ? validateInvoice(fields, Number(existing.raw_ocr_output?.confidence || 0)) : { errors: existing.validation_errors || [], status: existing.extraction_status };
-  const status = decision === 'APPROVED' ? 'APPROVED' : decision === 'REJECTED' ? 'REJECTED' : (req.body.extraction_status || validation.status);
+  const validation = validateInvoice(fields, Number(existing.raw_ocr_output?.confidence || 0));
+  if (existing.extraction_status === 'PROCESSING') throw new ApiError(409, 'Wait for extraction to finish.');
+  if (decision && !['APPROVED', 'REJECTED', 'NEEDS_CORRECTION'].includes(decision)) throw new ValidationError('Invalid review decision.');
+  const status = databaseStatus(decision === 'APPROVED' ? 'APPROVED' : decision === 'REJECTED' ? 'REJECTED' : validation.status);
   if (decision === 'APPROVED' && validation.errors.length) throw new ValidationError('Resolve validation issues before approving this document.', { validationErrors: validation.errors });
-  const review = await prisma.invoice_extraction_review.update({ where: { invoice_extraction_review_id: id(req.params.id) }, data: { extraction_status: status, extracted_fields: fields, validation_errors: validation.errors, reviewer_id: req.user.user_id, reviewer_decision: decision, reviewed_at: new Date(), review_notes: req.body.review_notes, updated_at: new Date() } });
+  const review = await prisma.invoice_extraction_review.update({ where: { invoice_extraction_review_id: id(req.params.id) }, data: { extraction_status: status, extracted_fields: fields || undefined, validation_errors: validation.errors, confidence_score: validation.confidence, reviewer_id: req.user.user_id, reviewer_decision: decision || 'NEEDS_CORRECTION', reviewed_at: new Date(), review_notes: req.body.review_notes, updated_at: new Date() } });
   console.info('Document review updated', { reviewId: review.invoice_extraction_review_id.toString(), status });
-  res.json({ success: true, data: review });
+  res.json({ success: true, data: publicReview(review) });
 }
 
 async function createApprovalRequest(req, res) {
@@ -839,4 +813,4 @@ async function submitApprovalAction(req, res) {
   res.status(201).json({ success: true, data: action });
 }
 
-module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createVendorInvoice, bookVendorInvoice, cancelVendorInvoice, listVendorInvoices, getVendorInvoice, createDocument, uploadDocument, listDocuments, getDocument, getDocumentFile, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
+module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createVendorInvoice, bookVendorInvoice, cancelVendorInvoice, listVendorInvoices, getVendorInvoice, createDocument, uploadDocument, retryDocument, listDocuments, getDocument, getDocumentFile, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
