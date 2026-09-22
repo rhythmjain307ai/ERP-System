@@ -301,11 +301,406 @@ async function dispatchDelivery(req, res) {
   res.json({ success: true, data: result });
 }
 
+async function consumeProductionMaterials(req, res) {
+  const workOrderId = id(req.params.id, 'id');
+  const productionQuantity = number(req.body.production_quantity ?? req.body.quantity, 'production_quantity');
+  if (productionQuantity <= 0) throw new ValidationError('production_quantity must be greater than zero');
+  const lines = req.body.items || req.body.consumption_lines;
+  if (!Array.isArray(lines) || lines.length === 0) throw new ValidationError('items must contain at least one consumption line');
+
+  const result = await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw`SELECT "work_order_id" FROM "public"."work_order" WHERE "work_order_id" = ${workOrderId} FOR UPDATE`;
+    if (locked.length === 0) throw new NotFoundError('work order');
+    const workOrder = await tx.work_order.findUnique({
+      where: { work_order_id: workOrderId },
+      include: { production_order: { include: { bill_of_material: { include: { bom_item: { include: { inventory_item: true } } } }, factory: true } } }
+    });
+    if (!workOrder) throw new NotFoundError('work order');
+    if (!['PENDING', 'RUNNING'].includes(workOrder.status)) throw new ApiError(409, `Work order is already ${workOrder.status}`);
+    if (!workOrder.production_order) throw new ValidationError('Work order is not linked to a production order');
+    const productionOrder = workOrder.production_order;
+    if (!productionOrder.bill_of_material) throw new ValidationError('Production order has no BOM');
+    if (productionOrder.status === 'CANCELLED' || productionOrder.status === 'COMPLETED') throw new ApiError(409, `Production order is already ${productionOrder.status}`);
+
+    const bomItems = new Map(productionOrder.bill_of_material.bom_item.map((item) => [item.component_item_id.toString(), item]));
+    const requestedByComponent = new Map();
+    const preparedLines = lines.map((line, index) => {
+      if (!line || (line.inventory_item_id === undefined && line.component_item_id === undefined && line.bom_item_id === undefined)) throw new ValidationError(`items[${index}].inventory_item_id is required`);
+      if (!line.uom) throw new ValidationError(`items[${index}].uom is required`);
+      const suppliedBomItem = line.bom_item_id === undefined ? null : productionOrder.bill_of_material.bom_item.find((item) => item.bom_item_id === id(line.bom_item_id, `items[${index}].bom_item_id`));
+      const inventoryItemId = id(line.inventory_item_id ?? line.component_item_id ?? suppliedBomItem?.component_item_id, `items[${index}].inventory_item_id`);
+      const bomItem = bomItems.get(inventoryItemId.toString());
+      if (!bomItem) throw new ValidationError(`items[${index}] is not a BOM component`);
+      if (suppliedBomItem && suppliedBomItem.bom_item_id !== bomItem.bom_item_id) throw new ValidationError(`items[${index}].bom_item_id does not match the component`);
+      if (line.uom !== bomItem.uom) throw new ValidationError(`items[${index}].uom must match the BOM component UOM`);
+      const quantity = number(line.quantity ?? line.consumed_quantity, `items[${index}].quantity`);
+      if (quantity <= 0) throw new ValidationError(`items[${index}].quantity must be greater than zero`);
+      const warehouseId = id(line.warehouse_id, `items[${index}].warehouse_id`);
+      const lotId = line.lot_id === undefined || line.lot_id === null ? (line.inventory_lot_id === undefined || line.inventory_lot_id === null ? null : id(line.inventory_lot_id, `items[${index}].inventory_lot_id`)) : id(line.lot_id, `items[${index}].lot_id`);
+      const key = `${inventoryItemId}:${warehouseId}:${lotId || 'null'}`;
+      requestedByComponent.set(inventoryItemId.toString(), (requestedByComponent.get(inventoryItemId.toString()) || 0) + quantity);
+      return { line, index, inventoryItemId, warehouseId, lotId, quantity, key };
+    });
+
+    const consumed = await tx.production_consumption.groupBy({ by: ['inventory_item_id'], where: { work_order_id: workOrderId }, _sum: { quantity: true } });
+    const consumedByComponent = new Map(consumed.map((row) => [row.inventory_item_id.toString(), Number(row._sum.quantity || 0)]));
+    for (const [componentId, requested] of requestedByComponent) {
+      const bomQuantity = Number(bomItems.get(componentId).quantity_per_unit);
+      const requestRequiredQuantity = productionQuantity * bomQuantity;
+      const orderRequiredQuantity = Number(workOrder.planned_quantity || productionQuantity) * bomQuantity;
+      const cumulativeQuantity = (consumedByComponent.get(componentId) || 0) + requested;
+      if (requested > requestRequiredQuantity) throw new ValidationError(`Consumption for BOM component ${componentId} exceeds required quantity ${requestRequiredQuantity}`);
+      if (cumulativeQuantity > orderRequiredQuantity) throw new ValidationError(`Cumulative consumption for BOM component ${componentId} exceeds work order requirement ${orderRequiredQuantity}`);
+    }
+
+    const stockBalances = new Map();
+    const requestedByStock = new Map();
+    for (const line of preparedLines.sort((left, right) => left.key.localeCompare(right.key))) {
+      if (!stockBalances.has(line.key)) stockBalances.set(line.key, await lockStockBalance(tx, line.inventoryItemId, line.warehouseId, line.lotId));
+      const warehouse = await tx.warehouse.findUnique({ where: { warehouse_id: line.warehouseId }, select: { factory_id: true } });
+      if (!warehouse || warehouse.factory_id !== productionOrder.factory_id) throw new ValidationError(`items[${line.index}].warehouse_id does not belong to the production order factory`);
+      const item = await tx.inventory_item.findUnique({ where: { inventory_item_id: line.inventoryItemId }, select: { is_lot_tracked: true } });
+      if (line.lotId) {
+        const lot = await tx.inventory_lot.findUnique({ where: { lot_id: line.lotId } });
+        if (!lot || lot.inventory_item_id !== line.inventoryItemId || lot.warehouse_id !== line.warehouseId) throw new ValidationError(`items[${line.index}].lot_id does not match the item and warehouse`);
+      } else if (item?.is_lot_tracked) {
+        throw new ValidationError(`items[${line.index}].lot_id is required for a lot-tracked item`);
+      }
+      const stock = stockBalances.get(line.key);
+      const available = stock ? Number(stock.quantity) - Number(stock.reserved_quantity) : 0;
+      const requested = (requestedByStock.get(line.key) || 0) + line.quantity;
+      if (!stock || requested > available) throw new ValidationError(`Insufficient stock for item ${line.inventoryItemId} in warehouse ${line.warehouseId}: requested ${requested}, available ${available}, shortage ${requested - available}`);
+      requestedByStock.set(line.key, requested);
+    }
+
+    for (const line of preparedLines) {
+      const stock = stockBalances.get(line.key);
+      await tx.inventory_stock.update({ where: { inventory_stock_id: stock.inventory_stock_id }, data: { quantity: { decrement: line.quantity }, last_updated_at: new Date() } });
+      await tx.production_consumption.create({ data: { production_order_id: productionOrder.production_order_id, work_order_id: workOrderId, inventory_item_id: line.inventoryItemId, lot_id: line.lotId, warehouse_id: line.warehouseId, quantity: line.quantity, remarks: line.line.remarks } });
+      await tx.stock_movement.create({ data: { inventory_item_id: line.inventoryItemId, warehouse_id: line.warehouseId, lot_id: line.lotId, movement_type: 'PRODUCTION_CONSUMPTION', reference_type: 'WORK_ORDER', reference_id: workOrderId, quantity: line.quantity, movement_date: new Date(), remarks: line.line.remarks || `Work order ${workOrder.work_order_number}` } });
+    }
+    await tx.production_order.update({ where: { production_order_id: productionOrder.production_order_id }, data: { status: 'IN_PROGRESS' } });
+    return tx.work_order.update({ where: { work_order_id: workOrderId }, data: { status: 'RUNNING' }, include: { production_order: true, production_consumption: true } });
+  });
+  res.json({ success: true, data: result });
+}
+
+async function outputProductionGoods(req, res) {
+  const workOrderId = id(req.params.id, 'id');
+  const quantity = number(req.body.quantity, 'quantity');
+  if (quantity <= 0) throw new ValidationError('quantity must be greater than zero');
+  const warehouseId = id(req.body.destination_warehouse_id ?? req.body.warehouse_id, 'warehouse_id');
+  const inventoryItemId = id(req.body.finished_item_id ?? req.body.inventory_item_id, 'inventory_item_id');
+
+  const result = await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw`SELECT "work_order_id" FROM "public"."work_order" WHERE "work_order_id" = ${workOrderId} FOR UPDATE`;
+    if (locked.length === 0) throw new NotFoundError('work order');
+    const workOrder = await tx.work_order.findUnique({ where: { work_order_id: workOrderId }, include: { production_order: { include: { inventory_item: true, factory: true, work_order: true, bill_of_material: { include: { bom_item: true } } } } } });
+    if (!workOrder) throw new NotFoundError('work order');
+    if (workOrder.status !== 'RUNNING') throw new ApiError(409, 'Output is allowed only after material consumption');
+    const productionOrder = workOrder.production_order;
+    if (!productionOrder) throw new ValidationError('Work order is not linked to a production order');
+    if (!productionOrder.bill_of_material || productionOrder.bill_of_material.bom_item.length === 0) throw new ValidationError('Production order has no BOM');
+    const consumed = await tx.production_consumption.groupBy({ by: ['inventory_item_id'], where: { work_order_id: workOrderId }, _sum: { quantity: true } });
+    const consumedByComponent = new Map(consumed.map((row) => [row.inventory_item_id.toString(), Number(row._sum.quantity || 0)]));
+    if (inventoryItemId !== productionOrder.inventory_item_id) throw new ValidationError('Output item must match the production order finished item');
+    if (!workOrder.planned_quantity || quantity > Number(workOrder.planned_quantity)) throw new ValidationError('Output quantity cannot exceed the work order planned quantity');
+    for (const bomItem of productionOrder.bill_of_material.bom_item) {
+      const requiredQuantity = quantity * Number(bomItem.quantity_per_unit);
+      const consumedQuantity = consumedByComponent.get(bomItem.component_item_id.toString()) || 0;
+      if (consumedQuantity < requiredQuantity) throw new ValidationError(`Insufficient consumption for BOM component ${bomItem.component_item_id}: required ${requiredQuantity}, consumed ${consumedQuantity}`);
+    }
+    const previousOutput = await tx.production_output.findFirst({ where: { work_order_id: workOrderId } });
+    if (previousOutput) throw new ApiError(409, 'Work order output has already been posted');
+    const item = productionOrder.inventory_item;
+    const warehouse = await tx.warehouse.findUnique({ where: { warehouse_id: warehouseId }, select: { factory_id: true } });
+    if (!warehouse || warehouse.factory_id !== productionOrder.factory_id) throw new ValidationError('Output warehouse does not belong to the production order factory');
+    let lotId = req.body.lot_id === undefined || req.body.lot_id === null ? null : id(req.body.lot_id, 'lot_id');
+    if (item.is_lot_tracked) {
+      if (lotId) {
+        const lot = await tx.inventory_lot.findUnique({ where: { lot_id: lotId } });
+        if (!lot || lot.inventory_item_id !== inventoryItemId || lot.warehouse_id !== warehouseId) throw new ValidationError('Output lot does not match the item and warehouse');
+      } else {
+        if (!req.body.lot_number) throw new ValidationError('lot_number is required for a lot-tracked item');
+        const existing = await tx.inventory_lot.findUnique({ where: { warehouse_id_lot_number: { warehouse_id: warehouseId, lot_number: req.body.lot_number } } });
+        if (existing && existing.inventory_item_id !== inventoryItemId) throw new ValidationError('Output lot does not match the item and warehouse');
+        const lot = existing || await tx.inventory_lot.create({ data: { inventory_item_id: inventoryItemId, warehouse_id: warehouseId, lot_number: req.body.lot_number, heat_number: req.body.heat_number, quantity_received: 0, accepted_quantity: 0 } });
+        lotId = lot.lot_id;
+      }
+      await tx.inventory_lot.update({ where: { lot_id: lotId }, data: { quantity_received: { increment: quantity }, accepted_quantity: { increment: quantity } } });
+    } else if (lotId) {
+      throw new ValidationError('lot_id is not valid for a non-lot-tracked item');
+    }
+    const stock = await lockStockBalance(tx, inventoryItemId, warehouseId, lotId);
+    const updatedStock = stock
+      ? await tx.inventory_stock.update({ where: { inventory_stock_id: stock.inventory_stock_id }, data: { quantity: { increment: quantity }, last_updated_at: new Date() } })
+      : await tx.inventory_stock.create({ data: { inventory_item_id: inventoryItemId, warehouse_id: warehouseId, lot_id: lotId, quantity, reserved_quantity: 0 } });
+    await tx.stock_movement.create({ data: { inventory_item_id: inventoryItemId, warehouse_id: warehouseId, lot_id: lotId, movement_type: 'PRODUCTION_OUTPUT', reference_type: 'WORK_ORDER', reference_id: workOrderId, quantity, movement_date: new Date(), remarks: req.body.remarks || `Work order ${workOrder.work_order_number}` } });
+    await tx.production_output.create({ data: { production_order_id: productionOrder.production_order_id, work_order_id: workOrderId, inventory_item_id: inventoryItemId, lot_id: lotId, warehouse_id: warehouseId, quantity, remarks: req.body.remarks } });
+    const completedWorkOrder = await tx.work_order.update({ where: { work_order_id: workOrderId }, data: { status: 'COMPLETED', actual_quantity: { increment: quantity }, end_time: new Date() } });
+    await tx.$queryRaw`SELECT 1 FROM "public"."production_order" WHERE "production_order_id" = ${productionOrder.production_order_id} FOR UPDATE`;
+    const workOrders = await tx.work_order.findMany({ where: { production_order_id: productionOrder.production_order_id }, select: { status: true } });
+    const allComplete = workOrders.length > 0 && workOrders.every((order) => order.status === 'COMPLETED');
+    await tx.production_order.update({ where: { production_order_id: productionOrder.production_order_id }, data: { status: allComplete ? 'COMPLETED' : 'IN_PROGRESS' } });
+    return { work_order: completedWorkOrder, stock: updatedStock };
+  });
+  res.json({ success: true, data: result });
+}
+
 async function createSalesInvoice(req, res) {
   required(req.body, ['invoice_number', 'customer_id']);
   return createWithItems(req, res, 'sales_invoice', 'sales_invoice_item', 'sales_invoice_id', 'sales_invoice_item', {
     invoice_number: req.body.invoice_number, invoice_type: req.body.invoice_type, customer_id: id(req.body.customer_id, 'customer_id'), customer_order_id: req.body.customer_order_id === undefined ? undefined : id(req.body.customer_order_id, 'customer_order_id'), invoice_date: date(req.body.invoice_date), due_date: date(req.body.due_date), payment_terms: req.body.payment_terms, taxable_amount: req.body.taxable_amount === undefined ? undefined : number(req.body.taxable_amount, 'taxable_amount'), cgst_amount: req.body.cgst_amount === undefined ? undefined : number(req.body.cgst_amount, 'cgst_amount'), sgst_amount: req.body.sgst_amount === undefined ? undefined : number(req.body.sgst_amount, 'sgst_amount'), igst_amount: req.body.igst_amount === undefined ? undefined : number(req.body.igst_amount, 'igst_amount'), total_amount: req.body.total_amount === undefined ? undefined : number(req.body.total_amount, 'total_amount'), status: req.body.status, notes: req.body.notes
   }, (parent, item) => ({ sales_invoice_id: parent.sales_invoice_id, customer_order_item_id: item.customer_order_item_id === undefined ? undefined : id(item.customer_order_item_id, 'customer_order_item_id'), inventory_item_id: item.inventory_item_id === undefined ? undefined : id(item.inventory_item_id, 'inventory_item_id'), description: item.description || '', hsn_sac_code: item.hsn_sac_code, uom: item.uom, quantity: item.quantity === undefined ? undefined : number(item.quantity, 'quantity'), unit_price: item.unit_price === undefined ? undefined : number(item.unit_price, 'unit_price'), discount_amount: item.discount_amount === undefined ? undefined : number(item.discount_amount, 'discount_amount'), taxable_amount: item.taxable_amount === undefined ? undefined : number(item.taxable_amount, 'taxable_amount'), gst_rate: item.gst_rate === undefined ? undefined : number(item.gst_rate, 'gst_rate'), line_total: item.line_total === undefined ? undefined : number(item.line_total, 'line_total') }));
+}
+
+async function createVendorInvoice(req, res) {
+  required(req.body, ['vendor_id', 'invoice_number', 'invoice_date', 'due_date']);
+  itemsRequired(req.body);
+  if (req.body.invoice_number.length < 1 || req.body.invoice_number.length > 100) throw new ValidationError('invoice_number must be between 1 and 100 characters');
+  const gstinPattern = /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+  for (const field of ['supplier_gstin', 'recipient_gstin']) {
+    if (req.body[field] !== undefined && req.body[field] !== null && !gstinPattern.test(req.body[field])) throw new ValidationError(`${field} must be a valid GSTIN`);
+  }
+  const vendorId = id(req.body.vendor_id, 'vendor_id');
+  const purchaseOrderId = req.body.purchase_order_id === undefined || req.body.purchase_order_id === null ? undefined : id(req.body.purchase_order_id, 'purchase_order_id');
+  const invoiceDate = date(req.body.invoice_date);
+  const dueDate = date(req.body.due_date);
+  const otherCharges = req.body.other_charges === undefined ? 0 : number(req.body.other_charges, 'other_charges');
+  const roundOff = req.body.round_off === undefined ? 0 : number(req.body.round_off, 'round_off');
+  const suppliedCessAmount = req.body.cess_amount === undefined ? 0 : number(req.body.cess_amount, 'cess_amount');
+  if (Number.isNaN(invoiceDate.getTime())) throw new ValidationError('invoice_date must be a valid date');
+  if (Number.isNaN(dueDate.getTime())) throw new ValidationError('due_date must be a valid date');
+  if (dueDate < invoiceDate) throw new ValidationError('Due date cannot be earlier than invoice date');
+  if (otherCharges < 0) throw new ValidationError('other_charges must be greater than or equal to zero');
+  if (roundOff < -1 || roundOff > 1) throw new ValidationError('round_off must be between -1 and 1');
+  if (suppliedCessAmount < 0) throw new ValidationError('cess_amount must be greater than or equal to zero');
+  const suppliedCgstAmount = req.body.cgst_amount === undefined ? 0 : number(req.body.cgst_amount, 'cgst_amount');
+  const suppliedSgstAmount = req.body.sgst_amount === undefined ? 0 : number(req.body.sgst_amount, 'sgst_amount');
+  const suppliedIgstAmount = req.body.igst_amount === undefined ? 0 : number(req.body.igst_amount, 'igst_amount');
+  if ((suppliedCgstAmount > 0 || suppliedSgstAmount > 0) && suppliedIgstAmount > 0) throw new ValidationError('CGST/SGST and IGST cannot both apply');
+  const supplierStateCode = req.body.supplier_gstin?.slice(0, 2);
+  const recipientStateCode = req.body.recipient_gstin?.slice(0, 2);
+  const isInterState = supplierStateCode && recipientStateCode && supplierStateCode !== recipientStateCode;
+
+  const result = await prisma.$transaction(async (tx) => {
+    const vendor = await tx.vendor.findUnique({ where: { vendor_id: vendorId }, select: { is_active: true } });
+    if (!vendor) throw new ValidationError('vendor does not exist');
+    if (!vendor.is_active) throw new ValidationError('vendor is inactive');
+
+    let purchaseOrder;
+    if (purchaseOrderId !== undefined) {
+      purchaseOrder = await tx.purchase_order.findUnique({ where: { purchase_order_id: purchaseOrderId }, select: { vendor_id: true, status: true } });
+      if (!purchaseOrder) throw new ValidationError('purchase order does not exist');
+      if (purchaseOrder.vendor_id !== vendorId) throw new ValidationError('purchase order vendor must match invoice vendor');
+      if (!['SENT', 'PARTIALLY_RECEIVED', 'RECEIVED'].includes(purchaseOrder.status)) throw new ValidationError('Purchase order status must be SENT, PARTIALLY_RECEIVED, or RECEIVED');
+    }
+
+    const preparedItems = [];
+    const requestedByPoItem = new Map();
+    const requestedByGrnItem = new Map();
+    const roundMoney = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
+    let taxableAmount = 0;
+    let discountAmount = 0;
+    let cgstAmount = 0;
+    let sgstAmount = 0;
+    let igstAmount = 0;
+    let cessAmount = 0;
+    let totalAmount = 0;
+
+    for (const [index, item] of req.body.items.entries()) {
+      const inventoryItemId = id(item.inventory_item_id, `items[${index}].inventory_item_id`);
+      const inventoryItem = await tx.inventory_item.findUnique({ where: { inventory_item_id: inventoryItemId }, select: { inventory_item_id: true } });
+      if (!inventoryItem) throw new ValidationError(`items[${index}] inventory item does not exist`);
+      const quantity = number(item.quantity, `items[${index}].quantity`);
+      if (quantity <= 0) throw new ValidationError(`items[${index}].quantity must be greater than zero`);
+      let purchaseOrderItem;
+      if (item.purchase_order_item_id !== undefined && item.purchase_order_item_id !== null) {
+        if (purchaseOrderId === undefined) throw new ValidationError('purchase_order_id is required when purchase_order_item_id is supplied');
+        const purchaseOrderItemId = id(item.purchase_order_item_id, `items[${index}].purchase_order_item_id`);
+        purchaseOrderItem = await tx.purchase_order_item.findUnique({ where: { purchase_order_item_id: purchaseOrderItemId } });
+        if (!purchaseOrderItem) throw new ValidationError('purchase order item does not exist');
+        if (purchaseOrderItem.purchase_order_id !== purchaseOrderId) throw new ValidationError('purchase order item does not belong to the supplied purchase order');
+        if (purchaseOrderItem.inventory_item_id !== inventoryItemId) throw new ValidationError('Invoice inventory item does not match purchase order item');
+        if (purchaseOrderItem.uom !== item.uom) throw new ValidationError('Invoice UOM does not match purchase order item');
+        requestedByPoItem.set(purchaseOrderItemId.toString(), (requestedByPoItem.get(purchaseOrderItemId.toString()) || 0) + quantity);
+      }
+      const rate = item.rate ?? item.unit_price ?? 0;
+      const unitPrice = number(rate, `items[${index}].rate`);
+      if (unitPrice < 0) throw new ValidationError(`items[${index}].rate must be greater than or equal to zero`);
+      if (purchaseOrderItem && unitPrice !== Number(purchaseOrderItem.unit_rate)) throw new ValidationError('Invoice rate does not match purchase order rate');
+      const discount = item.discount_amount === undefined ? 0 : number(item.discount_amount, `items[${index}].discount_amount`);
+      const gstRate = item.gst_rate === undefined ? 0 : number(item.gst_rate, `items[${index}].gst_rate`);
+      const cessRate = item.cess_rate === undefined ? 0 : number(item.cess_rate, `items[${index}].cess_rate`);
+      const suppliedItemCessAmount = item.cess_amount === undefined ? 0 : number(item.cess_amount, `items[${index}].cess_amount`);
+      const suppliedItemCgstAmount = item.cgst_amount === undefined ? 0 : number(item.cgst_amount, `items[${index}].cgst_amount`);
+      const suppliedItemSgstAmount = item.sgst_amount === undefined ? 0 : number(item.sgst_amount, `items[${index}].sgst_amount`);
+      const suppliedItemIgstAmount = item.igst_amount === undefined ? 0 : number(item.igst_amount, `items[${index}].igst_amount`);
+      if (discount < 0) throw new ValidationError(`items[${index}].discount_amount must be greater than or equal to zero`);
+      if (gstRate < 0 || gstRate > 100) throw new ValidationError(`items[${index}].gst_rate must be between 0 and 100`);
+      if (cessRate < 0) throw new ValidationError(`items[${index}].cess_rate must be greater than or equal to zero`);
+      if (suppliedItemCessAmount < 0) throw new ValidationError(`items[${index}].cess_amount must be greater than or equal to zero`);
+      if ((suppliedItemCgstAmount > 0 || suppliedItemSgstAmount > 0) && suppliedItemIgstAmount > 0) throw new ValidationError('CGST/SGST and IGST cannot both apply');
+      const taxableBeforeFloor = quantity * unitPrice - discount;
+      if (taxableBeforeFloor < 0) throw new ValidationError('taxable amount cannot be negative');
+      const lineTaxableAmount = roundMoney(taxableBeforeFloor);
+      const lineTaxAmount = roundMoney(lineTaxableAmount * gstRate / 100);
+      const lineCgstAmount = isInterState ? 0 : roundMoney(lineTaxAmount / 2);
+      const lineSgstAmount = isInterState ? 0 : roundMoney(lineTaxAmount - lineCgstAmount);
+      const lineIgstAmount = isInterState ? lineTaxAmount : 0;
+      const lineCessAmount = roundMoney(lineTaxableAmount * cessRate / 100);
+      const lineTotal = roundMoney(lineTaxableAmount + lineTaxAmount + lineCessAmount);
+      const matches = [];
+      for (const [matchIndex, match] of (Array.isArray(item.matches) ? item.matches : []).entries()) {
+        const grnItemId = id(match.grn_item_id, `items[${index}].matches[${matchIndex}].grn_item_id`);
+        const matchedQuantity = number(match.matched_quantity, `items[${index}].matches[${matchIndex}].matched_quantity`);
+        if (matchedQuantity <= 0) throw new ValidationError('matched_quantity must be greater than zero');
+        const grnItem = await tx.grn_item.findUnique({ where: { grn_item_id: grnItemId }, include: { grn: { select: { vendor_id: true, purchase_order_id: true } } } });
+        if (!grnItem) throw new ValidationError('GRN item does not exist');
+        if (grnItem.grn.vendor_id !== vendorId) throw new ValidationError('GRN item vendor must match invoice vendor');
+        if (purchaseOrderId !== undefined && grnItem.grn.purchase_order_id !== purchaseOrderId) throw new ValidationError('GRN item purchase order must match invoice purchase order');
+        if (grnItem.inventory_item_id !== inventoryItemId) throw new ValidationError('GRN item inventory item must match invoice item');
+        if (grnItem.uom !== item.uom) throw new ValidationError('GRN item UOM must match invoice item');
+        const matchKey = grnItemId.toString();
+        requestedByGrnItem.set(matchKey, (requestedByGrnItem.get(matchKey) || 0) + matchedQuantity);
+        matches.push({ grnItemId, matchedQuantity });
+      }
+      const totalMatchedQuantity = matches.reduce((total, match) => total + match.matchedQuantity, 0);
+      if (totalMatchedQuantity > quantity) throw new ValidationError('Matched quantity exceeds invoice item quantity');
+      preparedItems.push({
+        index,
+        inventoryItemId,
+        purchaseOrderItem,
+        purchaseOrderItemId: purchaseOrderItem?.purchase_order_item_id,
+        quantity,
+        unitPrice,
+        description: item.description || '',
+        hsnSacCode: item.hsn_sac_code,
+        uom: item.uom,
+        discount,
+        gstRate,
+        cessRate,
+        lineTaxableAmount,
+        lineCgstAmount,
+        lineSgstAmount,
+        lineIgstAmount,
+        lineCessAmount,
+        lineTotal,
+        matches
+      });
+      taxableAmount += lineTaxableAmount;
+      discountAmount += discount;
+      cgstAmount += lineCgstAmount;
+      sgstAmount += lineSgstAmount;
+      igstAmount += lineIgstAmount;
+      cessAmount += lineCessAmount;
+      totalAmount += lineTotal;
+    }
+
+    for (const [purchaseOrderItemId, requestedQuantity] of requestedByPoItem) {
+      const alreadyInvoiced = await tx.vendor_invoice_item.aggregate({ where: { purchase_order_item_id: BigInt(purchaseOrderItemId) }, _sum: { quantity: true } });
+      const orderedQuantity = Number(preparedItems.find((item) => item.purchaseOrderItemId.toString() === purchaseOrderItemId).purchaseOrderItem.ordered_quantity);
+      if (Number(alreadyInvoiced._sum.quantity || 0) + requestedQuantity > orderedQuantity) throw new ValidationError('Invoice quantity exceeds purchase order quantity');
+    }
+
+    for (const [grnItemId, requestedQuantity] of requestedByGrnItem) {
+      const alreadyMatched = await tx.vendor_invoice_grn_match.aggregate({ where: { grn_item_id: BigInt(grnItemId) }, _sum: { matched_quantity: true } });
+      const grnItem = await tx.grn_item.findUnique({ where: { grn_item_id: BigInt(grnItemId) }, select: { accepted_quantity: true } });
+      if (Number(alreadyMatched._sum.matched_quantity || 0) + requestedQuantity > Number(grnItem.accepted_quantity)) throw new ValidationError('Matched quantity exceeds GRN accepted quantity');
+    }
+
+    const invoice = await tx.vendor_invoice.create({ data: {
+      vendor_id: vendorId,
+      purchase_order_id: purchaseOrderId,
+      invoice_number: req.body.invoice_number,
+      invoice_date: invoiceDate,
+      due_date: dueDate,
+      payment_terms: req.body.payment_terms,
+      place_of_supply: req.body.place_of_supply,
+      supplier_gstin: req.body.supplier_gstin,
+      recipient_gstin: req.body.recipient_gstin,
+      supplier_reference: req.body.supplier_reference,
+      taxable_amount: roundMoney(taxableAmount),
+      cgst_amount: roundMoney(cgstAmount),
+      sgst_amount: roundMoney(sgstAmount),
+      igst_amount: roundMoney(igstAmount),
+      cess_amount: roundMoney(cessAmount),
+      discount_amount: roundMoney(discountAmount),
+      other_charges: roundMoney(otherCharges),
+      round_off: roundMoney(roundOff),
+      total_amount: roundMoney(totalAmount + otherCharges + roundOff),
+      status: 'DRAFT'
+    } });
+
+    for (const item of preparedItems) {
+      const invoiceItem = await tx.vendor_invoice_item.create({ data: {
+        vendor_invoice_id: invoice.vendor_invoice_id,
+        purchase_order_item_id: item.purchaseOrderItemId,
+        inventory_item_id: item.inventoryItemId,
+        description: item.description,
+        hsn_sac_code: item.hsnSacCode,
+        uom: item.uom,
+        quantity: item.quantity,
+        unit_price: item.unitPrice,
+        discount_amount: item.discount,
+        taxable_amount: item.lineTaxableAmount,
+        gst_rate: item.gstRate,
+        cgst_amount: item.lineCgstAmount,
+        sgst_amount: item.lineSgstAmount,
+        igst_amount: item.lineIgstAmount,
+        line_total: item.lineTotal
+      } });
+      for (const match of item.matches) {
+        await tx.vendor_invoice_grn_match.create({ data: { vendor_invoice_item_id: invoiceItem.vendor_invoice_item_id, grn_item_id: match.grnItemId, matched_quantity: match.matchedQuantity } });
+      }
+    }
+    const createdInvoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoice.vendor_invoice_id }, include: { vendor_invoice_item: { include: { vendor_invoice_grn_match: true } } } });
+    return { ...createdInvoice, vendor_invoice_item: createdInvoice.vendor_invoice_item.map((item) => ({ ...item, match_status: Number(item.vendor_invoice_grn_match.reduce((total, match) => total + Number(match.matched_quantity), 0)) === 0 ? 'UNMATCHED' : Number(item.vendor_invoice_grn_match.reduce((total, match) => total + Number(match.matched_quantity), 0)) >= Number(item.quantity) ? 'FULLY_MATCHED' : 'PARTIALLY_MATCHED' })) };
+  });
+  res.status(201).json({ success: true, data: result });
+}
+
+async function transitionVendorInvoice(req, res, status) {
+  const invoiceId = id(req.params.id, 'id');
+  const result = await prisma.$transaction(async (tx) => {
+    const invoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId }, select: { status: true } });
+    if (!invoice) throw new NotFoundError('vendor invoice');
+    if (invoice.status !== 'DRAFT') throw new ApiError(409, `Vendor invoice cannot transition from ${invoice.status} to ${status}`);
+    return tx.vendor_invoice.update({ where: { vendor_invoice_id: invoiceId }, data: { status } });
+  });
+  res.json({ success: true, status: result.status });
+}
+
+async function bookVendorInvoice(req, res) {
+  return transitionVendorInvoice(req, res, 'BOOKED');
+}
+
+async function cancelVendorInvoice(req, res) {
+  return transitionVendorInvoice(req, res, 'CANCELLED');
+}
+
+function addInvoiceMatchStatus(invoice) {
+  return { ...invoice, vendor_invoice_item: invoice.vendor_invoice_item.map((item) => {
+    const matchedQuantity = item.vendor_invoice_grn_match.reduce((total, match) => total + Number(match.matched_quantity), 0);
+    return { ...item, match_status: matchedQuantity === 0 ? 'UNMATCHED' : matchedQuantity >= Number(item.quantity) ? 'FULLY_MATCHED' : 'PARTIALLY_MATCHED' };
+  }) };
+}
+
+async function listVendorInvoices(req, res) {
+  const allowedStatuses = ['DRAFT', 'BOOKED', 'PARTIALLY_PAID', 'PAID', 'CANCELLED'];
+  const where = {};
+  if (req.query.status !== undefined) {
+    if (!allowedStatuses.includes(req.query.status)) throw new ValidationError('status must be DRAFT, BOOKED, PARTIALLY_PAID, PAID, or CANCELLED');
+    where.status = req.query.status;
+  }
+  const data = await prisma.vendor_invoice.findMany({ where, orderBy: { vendor_invoice_id: 'desc' }, select: { vendor_invoice_id: true, vendor_id: true, purchase_order_id: true, invoice_number: true, invoice_date: true, due_date: true, total_amount: true, status: true } });
+  res.json({ success: true, data });
+}
+
+async function getVendorInvoice(req, res) {
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: id(req.params.id, 'id') }, include: { vendor_invoice_item: { include: { vendor_invoice_grn_match: true } } } });
+  if (!invoice) throw new NotFoundError('vendor invoice');
+  res.json({ success: true, data: addInvoiceMatchStatus(invoice) });
 }
 
 async function createDocument(req, res) {
@@ -444,4 +839,4 @@ async function submitApprovalAction(req, res) {
   res.status(201).json({ success: true, data: action });
 }
 
-module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, createSalesInvoice, createDocument, uploadDocument, listDocuments, getDocument, getDocumentFile, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
+module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createVendorInvoice, bookVendorInvoice, cancelVendorInvoice, listVendorInvoices, getVendorInvoice, createDocument, uploadDocument, listDocuments, getDocument, getDocumentFile, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };

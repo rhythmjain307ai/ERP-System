@@ -32,10 +32,15 @@ async function setupIntegration() {
   const created = {
     requisitionIds: [],
     purchaseOrderIds: [],
+    vendorInvoiceIds: [],
     grnIds: [],
     orderIds: [],
     invoiceIds: [],
     deliveryIds: [],
+    productionOrderIds: [],
+    workOrderIds: [],
+    bomIds: [],
+    productionItemIds: [],
     approvalTransactionIds: []
   };
 
@@ -55,8 +60,18 @@ async function setupIntegration() {
       const transactionIds = created.approvalTransactionIds.map((value) => BigInt(value));
       await prisma.$transaction([
         prisma.approval_action.deleteMany({ where: { transaction_type: 'TEST', transaction_id: { in: transactionIds } } }),
+        prisma.stock_movement.deleteMany({ where: { reference_type: 'WORK_ORDER', reference_id: { in: created.workOrderIds } } }),
+        prisma.production_output.deleteMany({ where: { work_order_id: { in: created.workOrderIds } } }),
+        prisma.production_consumption.deleteMany({ where: { work_order_id: { in: created.workOrderIds } } }),
+        prisma.work_order.deleteMany({ where: { work_order_id: { in: created.workOrderIds } } }),
+        prisma.production_order.deleteMany({ where: { production_order_id: { in: created.productionOrderIds } } }),
+        prisma.bom_item.deleteMany({ where: { bom_id: { in: created.bomIds } } }),
+        prisma.bill_of_material.deleteMany({ where: { bom_id: { in: created.bomIds } } }),
+        prisma.inventory_stock.deleteMany({ where: { inventory_item_id: { in: created.productionItemIds } } }),
+        prisma.inventory_lot.deleteMany({ where: { inventory_item_id: { in: created.productionItemIds } } }),
         prisma.approval_request.deleteMany({ where: { approval_workflow_id: workflow.approval_workflow_id } }),
         prisma.delivery.deleteMany({ where: { delivery_id: { in: created.deliveryIds } } }),
+        prisma.vendor_invoice.deleteMany({ where: { vendor_id: { in: [vendor.vendor_id, otherVendor.vendor_id] } } }),
         prisma.sales_invoice.deleteMany({ where: { sales_invoice_id: { in: created.invoiceIds } } }),
         prisma.customer_order.deleteMany({ where: { customer_order_id: { in: created.orderIds } } }),
         prisma.stock_movement.deleteMany({ where: { inventory_item_id: { in: [inventoryItem.inventory_item_id, lotInventoryItem.inventory_item_id] }, warehouse_id: warehouse.warehouse_id } }),
@@ -70,6 +85,7 @@ async function setupIntegration() {
         prisma.role.delete({ where: { role_id: role.role_id } }),
         prisma.inventory_item.delete({ where: { inventory_item_id: inventoryItem.inventory_item_id } }),
         prisma.inventory_item.delete({ where: { inventory_item_id: lotInventoryItem.inventory_item_id } }),
+        prisma.inventory_item.deleteMany({ where: { inventory_item_id: { in: created.productionItemIds } } }),
         prisma.warehouse.delete({ where: { warehouse_id: warehouse.warehouse_id } }),
         prisma.customer.delete({ where: { customer_id: customer.customer_id } }),
         prisma.customer.delete({ where: { customer_id: otherCustomer.customer_id } }),

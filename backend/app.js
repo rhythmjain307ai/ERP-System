@@ -18,6 +18,7 @@ app.use('/api/master', routes.master);
 app.use('/api/inventory', routes.inventory);
 app.use('/api/procurement', routes.procurement);
 app.use('/api/sales', routes.sales);
+app.use('/api/production', routes.production);
 app.use('/api/documents', routes.documents);
 app.use('/api/approvals', routes.approvals);
 app.use('/api/weighbridge-tickets', routes.weighbridgeTickets);
