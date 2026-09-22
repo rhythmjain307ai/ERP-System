@@ -55,7 +55,7 @@ test('uploads an image invoice and returns document plus extraction review data'
     assert.equal(response.body.success, true);
     assert.ok(response.body.data.document_id);
     assert.ok(response.body.data.invoice_extraction_review);
-    assert.equal(response.body.data.invoice_extraction_review.extraction_status, 'EXTRACTED');
+    assert.equal(response.body.data.invoice_extraction_review.extraction_status, 'PROCESSED');
     assert.equal(response.body.data.invoice_extraction_review.extracted_fields.invoiceNumber, invoiceNumber);
     assert.equal(response.body.data.invoice_extraction_review.extracted_fields.vendor.name, 'Bharat Steel Industries');
     assert.equal(response.body.data.invoice_extraction_review.validation_errors.length, 0);
@@ -83,7 +83,7 @@ test('keeps uploaded documents available when OCR extraction fails and marks the
   try {
     const response = await request(appWithFailingOcr).post('/api/documents/upload').set('Authorization', context.auth).attach('file', png, { filename: 'unreadable.png', contentType: 'image/png' });
     assert.equal(response.status, 201);
-    assert.equal(response.body.data.invoice_extraction_review.extraction_status, 'UNDER_REVIEW');
+    assert.equal(response.body.data.invoice_extraction_review.extraction_status, 'NEEDS_REVIEW');
     assert.ok(Array.isArray(response.body.data.invoice_extraction_review.validation_errors));
     assert.match(response.body.data.invoice_extraction_review.validation_errors.join(' '), /OCR could not read the invoice text/i);
     assert.ok(response.body.data.document_id);

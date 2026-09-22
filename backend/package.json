@@ -9,8 +9,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev --name init",
     "seed": "node prisma/seed.js",
-    "test": "node --test test/api.test.js test/ocr.test.js test/upload.test.js test/pdf.test.js test/documents.test.js",
-    "test:ocr": "node --test test/ocr.test.js test/upload.test.js test/pdf.test.js test/documents.test.js"
+    "test": "node --test --test-concurrency=1 test/api.test.js test/ocr.test.js test/upload.test.js test/pdf.test.js test/documents.test.js",
+    "test:ocr": "node --test --test-concurrency=1 test/ocr.test.js test/upload.test.js test/pdf.test.js test/documents.test.js"
   },
   "dependencies": {
     "@prisma/client": "^6.19.3",
