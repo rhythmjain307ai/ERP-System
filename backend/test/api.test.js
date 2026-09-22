@@ -22,6 +22,15 @@ test('requires authentication for writes', async () => {
   assert.equal(response.status, 401);
 });
 
+test('requires authentication for procurement and inventory reads', async () => {
+  const responses = await Promise.all([
+    request(app).get('/api/procurement/purchase-orders'),
+    request(app).get('/api/procurement/grns'),
+    request(app).get('/api/inventory/stocks')
+  ]);
+  assert.deepEqual(responses.map(response => response.status), [401, 401, 401]);
+});
+
 test('returns 404 for unknown routes', async () => {
   const response = await request(app).get('/api/unknown-record');
   assert.equal(response.status, 404);

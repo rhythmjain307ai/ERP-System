@@ -73,6 +73,8 @@ Transactional creation endpoints:
 - `POST /api/approvals/requests`
 - `POST /api/approvals/actions`
 
+Procurement and inventory workflow reads are available to authenticated users through `GET /api/procurement/purchase-orders`, `GET /api/procurement/purchase-orders/:id`, `GET /api/procurement/grns`, `GET /api/procurement/grns/:id`, and `GET /api/inventory/stocks`. Purchase order and GRN lists support `page`, `pageSize`, `search`, and status filters; inventory stock supports `page`, `pageSize`, `search`, `item_id`, and `warehouse_id`. Generic inventory movement, lot, item, warehouse, vendor, and master list endpoints remain available under their existing routes.
+
 Example purchase requisition:
 
 ```json

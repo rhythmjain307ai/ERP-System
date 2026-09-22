@@ -61,6 +61,65 @@ async function createPurchaseOrder(req, res) {
   }, (parent, item) => ({ purchase_order_id: parent.purchase_order_id, inventory_item_id: id(item.inventory_item_id, 'inventory_item_id'), description: item.description, hsn_sac_code: item.hsn_sac_code, uom: item.uom, ordered_quantity: number(item.ordered_quantity ?? item.quantity, 'ordered_quantity'), unit_rate: item.unit_rate === undefined ? undefined : number(item.unit_rate, 'unit_rate'), discount_amount: item.discount_amount === undefined ? undefined : number(item.discount_amount, 'discount_amount'), gst_rate: item.gst_rate === undefined ? undefined : number(item.gst_rate, 'gst_rate'), line_amount: item.line_amount === undefined ? undefined : number(item.line_amount, 'line_amount') }));
 }
 
+function pageQuery(req) {
+  const page = Math.max(Number(req.query.page) || 1, 1);
+  const pageSize = Math.min(Math.max(Number(req.query.pageSize) || 25, 1), 100);
+  return { page, pageSize };
+}
+
+async function listPurchaseOrders(req, res) {
+  const { page, pageSize } = pageQuery(req);
+  const where = {};
+  if (req.query.status) where.status = req.query.status;
+  if (req.query.vendor_id) where.vendor_id = id(req.query.vendor_id, 'vendor_id');
+  if (req.query.search) where.OR = [{ po_number: { contains: req.query.search, mode: 'insensitive' } }, { vendor: { vendor_name: { contains: req.query.search, mode: 'insensitive' } } }];
+  const [data, total] = await prisma.$transaction([
+    prisma.purchase_order.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, orderBy: { purchase_order_id: 'desc' }, include: { vendor: true, purchase_order_item: { include: { inventory_item: true } }, grn: { select: { grn_id: true, grn_number: true, inspection_status: true } } } }),
+    prisma.purchase_order.count({ where })
+  ]);
+  res.json({ success: true, data, meta: { page, pageSize, total, pageCount: Math.ceil(total / pageSize) } });
+}
+
+async function getPurchaseOrder(req, res) {
+  const purchaseOrderId = id(req.params.id, 'id');
+  const data = await prisma.purchase_order.findUnique({ where: { purchase_order_id: purchaseOrderId }, include: { vendor: true, purchase_order_item: { include: { inventory_item: true, grn_item: { include: { grn: true } } } }, grn: { include: { grn_item: true } } } });
+  if (!data) throw new NotFoundError('purchase order');
+  res.json({ success: true, data });
+}
+
+async function listGrns(req, res) {
+  const { page, pageSize } = pageQuery(req);
+  const where = {};
+  if (req.query.status) where.inspection_status = req.query.status;
+  if (req.query.purchase_order_id) where.purchase_order_id = id(req.query.purchase_order_id, 'purchase_order_id');
+  if (req.query.search) where.OR = [{ grn_number: { contains: req.query.search, mode: 'insensitive' } }, { vendor: { vendor_name: { contains: req.query.search, mode: 'insensitive' } } }];
+  const [data, total] = await prisma.$transaction([
+    prisma.grn.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, orderBy: { grn_id: 'desc' }, include: { vendor: true, warehouse: true, purchase_order: { select: { purchase_order_id: true, po_number: true } }, grn_item: { include: { inventory_item: true, inventory_lot: true } } } }),
+    prisma.grn.count({ where })
+  ]);
+  res.json({ success: true, data, meta: { page, pageSize, total, pageCount: Math.ceil(total / pageSize) } });
+}
+
+async function getGrn(req, res) {
+  const grnId = id(req.params.id, 'id');
+  const data = await prisma.grn.findUnique({ where: { grn_id: grnId }, include: { vendor: true, warehouse: true, purchase_order: { include: { vendor: true } }, grn_item: { include: { inventory_item: true, inventory_lot: true, purchase_order_item: true } } } });
+  if (!data) throw new NotFoundError('grn');
+  res.json({ success: true, data });
+}
+
+async function listInventoryStocks(req, res) {
+  const { page, pageSize } = pageQuery(req);
+  const where = {};
+  if (req.query.item_id) where.inventory_item_id = id(req.query.item_id, 'item_id');
+  if (req.query.warehouse_id) where.warehouse_id = id(req.query.warehouse_id, 'warehouse_id');
+  if (req.query.search) where.OR = [{ inventory_item: { item_name: { contains: req.query.search, mode: 'insensitive' } } }, { inventory_item: { item_code: { contains: req.query.search, mode: 'insensitive' } } }, { warehouse: { warehouse_name: { contains: req.query.search, mode: 'insensitive' } } }];
+  const [data, total] = await prisma.$transaction([
+    prisma.inventory_stock.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, orderBy: { last_updated_at: 'desc' }, include: { inventory_item: true, warehouse: true, inventory_lot: true } }),
+    prisma.inventory_stock.count({ where })
+  ]);
+  res.json({ success: true, data, meta: { page, pageSize, total, pageCount: Math.ceil(total / pageSize) } });
+}
+
 async function createGrn(req, res) {
   required(req.body, ['grn_number', 'vendor_id', 'warehouse_id']);
   if (req.body.purchase_order_id !== undefined && (!Array.isArray(req.body.items) || req.body.items.some((item) => item.purchase_order_item_id === undefined || item.purchase_order_item_id === null))) throw new ValidationError('PO-linked GRN items must reference a purchase order item');
@@ -813,4 +872,4 @@ async function submitApprovalAction(req, res) {
   res.status(201).json({ success: true, data: action });
 }
 
-module.exports = { createRequisition, createPurchaseOrder, createGrn, postGrn, createCustomerOrder, createDelivery, dispatchDelivery, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createVendorInvoice, bookVendorInvoice, cancelVendorInvoice, listVendorInvoices, getVendorInvoice, createDocument, uploadDocument, retryDocument, listDocuments, getDocument, getDocumentFile, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };
+module.exports = { createRequisition, createPurchaseOrder, listPurchaseOrders, getPurchaseOrder, createGrn, listGrns, getGrn, postGrn, listInventoryStocks, createCustomerOrder, createDelivery, dispatchDelivery, consumeProductionMaterials, outputProductionGoods, createSalesInvoice, createVendorInvoice, bookVendorInvoice, cancelVendorInvoice, listVendorInvoices, getVendorInvoice, createDocument, uploadDocument, retryDocument, listDocuments, getDocument, getDocumentFile, updateDocument, getReview, updateReview, createApprovalRequest, submitApprovalAction };

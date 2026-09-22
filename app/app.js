@@ -134,6 +134,8 @@ function routeTo(view) {
 }
 
 function renderModule(name) {
+  if (name === "purchase") return renderProcurement();
+  if (name === "inventory") return renderInventory();
   const module = moduleData[name];
   appState.activeModule = name;
   moduleStack.innerHTML = `
@@ -164,6 +166,127 @@ function renderModule(name) {
     </div>
   `;
 }
+
+function workflowApi(path, options = {}) {
+  const token = authToken();
+  if (!token) return Promise.reject(new Error('Your ERP session is not connected. Sign in again to continue.'));
+  const headers = { ...(options.headers || {}), Authorization: `Bearer ${token}` };
+  if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  return fetch(`/api${path}`, { ...options, headers }).then(async response => {
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(body.error?.message || `Request failed (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+    return body;
+  });
+}
+
+const workflowState = { vendors: [], items: [], warehouses: [], purchaseOrders: [], grns: [], selectedPo: null };
+
+function optionMarkup(records, valueKey, label) {
+  return records.map(record => `<option value="${escapeHtml(record[valueKey])}">${escapeHtml(label(record))}</option>`).join('');
+}
+
+function workflowError(error) {
+  if (error.status === 401) return 'Your ERP session has expired. Sign in again to continue.';
+  if (error.status === 403) return 'You do not have permission to perform this action.';
+  if (error.message === 'Failed to fetch') return 'The ERP server could not be reached. Check that the backend is running.';
+  return error.message;
+}
+
+async function loadWorkflowData() {
+  const [vendors, items, warehouses, purchaseOrders, grns] = await Promise.all([
+    workflowApi('/master/vendors?pageSize=100'), workflowApi('/inventory/items?pageSize=100'), workflowApi('/inventory/warehouses?pageSize=100'),
+    workflowApi('/procurement/purchase-orders?pageSize=100'), workflowApi('/procurement/grns?pageSize=100&status=PENDING')
+  ]);
+  workflowState.vendors = vendors.data;
+  workflowState.items = items.data;
+  workflowState.warehouses = warehouses.data;
+  workflowState.purchaseOrders = purchaseOrders.data;
+  workflowState.grns = grns.data;
+}
+
+function procurementShell(content) {
+  moduleStack.innerHTML = `<div class="workflow-view"><div class="workflow-title"><div><p class="eyebrow">Procurement control</p><h3>Purchase order to receipt</h3><small>Build orders, record receipts, inspect, and post accepted stock.</small></div><span class="status-pill good">Live API</span></div>${content}</div>`;
+}
+
+function renderProcurementLoading(message = 'Loading procurement data…') { procurementShell(`<p class="empty-copy workflow-message">${escapeHtml(message)}</p>`); }
+
+function renderProcurement() {
+  renderProcurementLoading();
+  loadWorkflowData().then(() => renderProcurementHome()).catch(error => renderProcurementLoading(workflowError(error)));
+}
+
+function renderProcurementHome() {
+  const poRows = workflowState.purchaseOrders.length ? workflowState.purchaseOrders.map(po => `<article class="workflow-row"><div><strong>${escapeHtml(po.po_number)}</strong><small>${escapeHtml(po.vendor?.vendor_name || 'Vendor')} · ${po.purchase_order_item.length} line(s) · ${escapeHtml(po.status)}</small></div><div class="workflow-row-actions"><span class="status-pill ${po.status === 'RECEIVED' ? 'good' : 'warn'}">${escapeHtml(po.status)}</span><button class="mini-btn" type="button" data-po-id="${po.purchase_order_id}">Open</button><button class="mini-btn" type="button" data-create-grn-po="${po.purchase_order_id}">Receive</button></div></article>`).join('') : '<p class="empty-copy">No purchase orders match the current filters.</p>';
+  const grnRows = workflowState.grns.length ? workflowState.grns.map(grn => `<article class="workflow-row"><div><strong>${escapeHtml(grn.grn_number)}</strong><small>${escapeHtml(grn.vendor?.vendor_name || 'Vendor')} · ${escapeHtml(grn.warehouse?.warehouse_name || 'Warehouse')} · ${escapeHtml(grn.purchase_order?.po_number || 'No PO')}</small></div><div class="workflow-row-actions"><span class="status-pill warn">${escapeHtml(grn.inspection_status)}</span><button class="mini-btn" type="button" data-grn-id="${grn.grn_id}">Inspect</button></div></article>`).join('') : '<p class="empty-copy">No pending GRNs need inspection.</p>';
+  procurementShell(`<div class="workflow-actions"><button class="primary-btn small workflow-button" type="button" data-workflow="new-po">Create purchase order</button><button class="mini-btn" type="button" data-workflow="new-grn">Create GRN</button></div><section class="panel workflow-panel"><div class="section-head"><h3>Purchase orders</h3><span class="status-pill">${workflowState.purchaseOrders.length}</span></div><div class="workflow-filters"><input id="poSearch" placeholder="Search PO or vendor" aria-label="Search purchase orders"><select id="poStatus" aria-label="Purchase order status"><option value="">All statuses</option><option>DRAFT</option><option>SENT</option><option>PARTIALLY_RECEIVED</option><option>RECEIVED</option></select></div><div class="workflow-list" id="purchaseOrderList">${poRows}</div></section><section class="panel workflow-panel"><div class="section-head"><h3>Pending GRNs</h3><span class="status-pill warn">${workflowState.grns.length}</span></div><div class="workflow-list">${grnRows}</div></section><section id="workflowPane" class="workflow-pane" hidden></section>`);
+  document.querySelectorAll('[data-po-id]').forEach(button => button.onclick = () => openPurchaseOrder(button.dataset.poId));
+  document.querySelectorAll('[data-create-grn-po]').forEach(button => button.onclick = () => renderGrnForm(button.dataset.createGrnPo));
+  document.querySelectorAll('[data-grn-id]').forEach(button => button.onclick = () => openGrn(button.dataset.grnId));
+  document.querySelector('[data-workflow="new-po"]').onclick = () => renderPurchaseOrderForm();
+  document.querySelector('[data-workflow="new-grn"]').onclick = () => renderGrnForm();
+  document.getElementById('poSearch').oninput = filterPurchaseOrders;
+  document.getElementById('poStatus').onchange = filterPurchaseOrders;
+}
+
+function filterPurchaseOrders() {
+  const search = document.getElementById('poSearch').value.trim().toLowerCase();
+  const status = document.getElementById('poStatus').value;
+  document.querySelectorAll('#purchaseOrderList .workflow-row').forEach(row => { row.hidden = Boolean((search && !row.textContent.toLowerCase().includes(search)) || (status && !row.textContent.includes(status))); });
+}
+
+function showWorkflowPane(html) { const pane = document.getElementById('workflowPane'); pane.hidden = false; pane.innerHTML = html; pane.scrollIntoView({ behavior: 'smooth', block: 'start' }); return pane; }
+
+function renderPurchaseOrderForm() {
+  const rows = [{ inventory_item_id: '', uom: '', ordered_quantity: '', unit_rate: '', description: '' }];
+  showWorkflowPane(`<div class="detail-head"><h3>Create purchase order</h3><button class="mini-btn" type="button" data-close-workflow>Close</button></div><form id="purchaseOrderForm" class="workflow-form"><div class="field-grid"><label>PO number<input name="po_number" required placeholder="PO-1001"></label><label>Vendor<select name="vendor_id" required><option value="">Select vendor</option>${optionMarkup(workflowState.vendors, 'vendor_id', vendor => `${vendor.vendor_code} · ${vendor.vendor_name}`)}</select></label><label>Expected date<input name="expected_date" type="date"></label><label>Payment terms<input name="payment_terms" placeholder="Net 30"></label><label class="wide">Notes<textarea name="notes" rows="2"></textarea></label></div><div class="line-editor"><div class="section-head"><h4>Order lines</h4><button class="mini-btn" type="button" id="addPoLine">Add line</button></div><div id="poLines"></div></div><p id="poFormMessage" class="form-message" role="alert"></p><button class="primary-btn" type="submit">Create purchase order</button></form>`);
+  const form = document.getElementById('purchaseOrderForm');
+  const lines = document.getElementById('poLines');
+  const renderLines = () => { lines.innerHTML = rows.map((line, index) => `<div class="line-editor-row" data-line="${index}"><label>Item<select data-field="inventory_item_id" required><option value="">Select item</option>${optionMarkup(workflowState.items, 'inventory_item_id', item => `${item.item_code} · ${item.item_name}`)}</select></label><label>UOM<input data-field="uom" required value="${escapeHtml(line.uom)}" placeholder="EA"></label><label>Quantity<input data-field="ordered_quantity" required min="0.001" step="0.001" type="number" value="${escapeHtml(line.ordered_quantity)}"></label><label>Unit rate<input data-field="unit_rate" min="0" step="0.01" type="number" value="${escapeHtml(line.unit_rate)}"></label><label>Notes<input data-field="description" value="${escapeHtml(line.description)}"></label><button class="icon-btn" type="button" data-remove-line="${index}" aria-label="Remove line">×</button></div>`).join(''); rows.forEach((line, index) => { const row = lines.querySelector(`[data-line="${index}"]`); Object.entries(line).forEach(([key, value]) => { const input = row.querySelector(`[data-field="${key}"]`); if (input) input.value = value; }); }); lines.querySelectorAll('[data-field]').forEach(input => input.oninput = () => { rows[Number(input.closest('[data-line]').dataset.line)][input.dataset.field] = input.value; }); lines.querySelectorAll('[data-remove-line]').forEach(button => button.onclick = () => { if (rows.length > 1) { rows.splice(Number(button.dataset.removeLine), 1); renderLines(); } }); };
+  renderLines();
+  document.getElementById('addPoLine').onclick = () => { rows.push({ inventory_item_id: '', uom: '', ordered_quantity: '', unit_rate: '', description: '' }); renderLines(); };
+  document.querySelector('[data-close-workflow]').onclick = renderProcurementHome;
+  form.onsubmit = async event => { event.preventDefault(); const message = document.getElementById('poFormMessage'); const data = new FormData(form); const items = rows.map(line => ({ inventory_item_id: line.inventory_item_id, uom: line.uom, ordered_quantity: Number(line.ordered_quantity), unit_rate: line.unit_rate === '' ? undefined : Number(line.unit_rate), description: line.description || undefined })); if (items.some(item => !item.inventory_item_id || !item.uom || !item.ordered_quantity || item.ordered_quantity <= 0)) { message.textContent = 'Complete every order line with an item, UOM, and quantity greater than zero.'; return; } event.submitter.disabled = true; message.textContent = 'Creating purchase order…'; try { const response = await workflowApi('/procurement/purchase-orders', { method: 'POST', body: JSON.stringify({ po_number: data.get('po_number'), vendor_id: data.get('vendor_id'), expected_date: data.get('expected_date') || undefined, payment_terms: data.get('payment_terms') || undefined, notes: data.get('notes') || undefined, items }) }); showToast(`Purchase order ${response.data.po_number} created`); await refreshProcurement(); } catch (error) { message.textContent = workflowError(error); event.submitter.disabled = false; } };
+}
+
+async function refreshProcurement() { await loadWorkflowData(); renderProcurementHome(); }
+
+async function openPurchaseOrder(id) { const pane = showWorkflowPane('<p class="empty-copy">Loading purchase order…</p>'); try { const response = await workflowApi(`/procurement/purchase-orders/${id}`); const po = response.data; pane.innerHTML = `<div class="detail-head"><h3>${escapeHtml(po.po_number)}</h3><button class="mini-btn" type="button" data-close-workflow>Close</button></div><p class="workflow-subtitle">${escapeHtml(po.vendor.vendor_name)} · ${escapeHtml(po.status)}</p><div class="workflow-list">${po.purchase_order_item.map(item => `<div class="workflow-row"><div><strong>${escapeHtml(item.inventory_item.item_name)}</strong><small>${escapeHtml(item.description || '')}</small></div><span>${escapeHtml(item.ordered_quantity)} ${escapeHtml(item.uom)} · ${currency(item.unit_rate)}</span></div>`).join('')}</div><button class="primary-btn small workflow-button" type="button" data-create-grn-po="${po.purchase_order_id}">Create GRN for this PO</button>`; pane.querySelector('[data-close-workflow]').onclick = renderProcurementHome; pane.querySelector('[data-create-grn-po]').onclick = () => renderGrnForm(po.purchase_order_id); } catch (error) { pane.innerHTML = `<p class="empty-copy">${escapeHtml(workflowError(error))}</p>`; } }
+
+function renderGrnForm(poId = '') {
+  const selected = workflowState.purchaseOrders.find(po => String(po.purchase_order_id) === String(poId));
+  const poOptions = optionMarkup(workflowState.purchaseOrders.filter(po => !['RECEIVED', 'CANCELLED'].includes(po.status)), 'purchase_order_id', po => `${po.po_number} · ${po.vendor?.vendor_name || ''}`);
+  showWorkflowPane(`<div class="detail-head"><h3>Create goods receipt</h3><button class="mini-btn" type="button" data-close-workflow>Close</button></div><form id="grnForm" class="workflow-form"><div class="field-grid"><label>GRN number<input name="grn_number" required placeholder="GRN-1001"></label><label>Purchase order<select id="grnPo" name="purchase_order_id" required><option value="">Select PO</option>${poOptions}</select></label><label>Warehouse<select name="warehouse_id" required><option value="">Select warehouse</option>${optionMarkup(workflowState.warehouses, 'warehouse_id', warehouse => `${warehouse.warehouse_code} · ${warehouse.warehouse_name}`)}</select></label><label>Challan number<input name="challan_number"></label></div><div id="grnLines" class="line-editor"></div><p id="grnFormMessage" class="form-message" role="alert"></p><button class="primary-btn" type="submit">Create pending GRN</button></form>`);
+  const form = document.getElementById('grnForm'); const poSelect = document.getElementById('grnPo'); poSelect.value = poId || ''; document.querySelector('[data-close-workflow]').onclick = renderProcurementHome;
+  const renderLines = () => { const po = workflowState.purchaseOrders.find(record => String(record.purchase_order_id) === poSelect.value); document.getElementById('grnLines').innerHTML = po ? `<div class="section-head"><h4>Receipt lines</h4><small>${escapeHtml(po.vendor.vendor_name)}</small></div>${po.purchase_order_item.map((item, index) => `<div class="line-editor-row grn-line" data-line="${index}" data-po-item="${item.purchase_order_item_id}"><div><strong>${escapeHtml(item.inventory_item.item_name)}</strong><small>Ordered ${escapeHtml(item.ordered_quantity)} ${escapeHtml(item.uom)}</small></div><label>Received<input data-field="received_quantity" required min="0.001" max="${escapeHtml(item.ordered_quantity)}" step="0.001" type="number"></label><label>UOM<input data-field="uom" required value="${escapeHtml(item.uom)}"></label><label>Lot / heat<input data-field="heat_number" placeholder="Optional"></label></div>`).join('')}` : '<p class="empty-copy">Select a purchase order to load its lines.</p>'; };
+  poSelect.onchange = renderLines; renderLines();
+  form.onsubmit = async event => { event.preventDefault(); const message = document.getElementById('grnFormMessage'); const data = new FormData(form); const po = workflowState.purchaseOrders.find(record => String(record.purchase_order_id) === poSelect.value); const lines = [...document.querySelectorAll('.grn-line')].map(row => ({ purchase_order_item_id: row.dataset.poItem, inventory_item_id: po.purchase_order_item.find(item => String(item.purchase_order_item_id) === row.dataset.poItem).inventory_item_id, received_quantity: Number(row.querySelector('[data-field="received_quantity"]').value), uom: row.querySelector('[data-field="uom"]').value, heat_number: row.querySelector('[data-field="heat_number"]').value || undefined })); if (!po || lines.some(line => !line.received_quantity || line.received_quantity <= 0 || !line.uom)) { message.textContent = 'Select a purchase order and enter a received quantity and UOM for every line.'; return; } event.submitter.disabled = true; message.textContent = 'Creating pending GRN…'; try { const response = await workflowApi('/procurement/grns', { method: 'POST', body: JSON.stringify({ grn_number: data.get('grn_number'), purchase_order_id: po.purchase_order_id, vendor_id: po.vendor_id, warehouse_id: data.get('warehouse_id'), challan_number: data.get('challan_number') || undefined, items: lines }) }); showToast(`GRN ${response.data.grn_number} is pending inspection`); await refreshProcurement(); await openGrn(response.data.grn_id); } catch (error) { message.textContent = workflowError(error); event.submitter.disabled = false; } };
+}
+
+async function openGrn(id) {
+  const pane = showWorkflowPane('<p class="empty-copy">Loading GRN…</p>');
+  try {
+    const response = await workflowApi(`/procurement/grns/${id}`);
+    const grn = response.data;
+    pane.innerHTML = `<div class="detail-head"><div><h3>${escapeHtml(grn.grn_number)}</h3><small>${escapeHtml(grn.vendor.vendor_name)} · ${escapeHtml(grn.warehouse.warehouse_name)} · ${escapeHtml(grn.purchase_order?.po_number || 'No PO')}</small></div><span class="status-pill warn">${escapeHtml(grn.inspection_status)}</span></div><form id="grnInspectionForm" class="workflow-form"><div class="workflow-list">${grn.grn_item.map(item => `<div class="inspection-row" data-grn-item="${item.grn_item_id}"><div><strong>${escapeHtml(item.inventory_item.item_name)}</strong><small>Received ${escapeHtml(item.received_quantity)} ${escapeHtml(item.uom)}${item.heat_number ? ` · Heat ${escapeHtml(item.heat_number)}` : ''}</small></div><label>Accepted<input data-field="accepted_quantity" required min="0" max="${escapeHtml(item.received_quantity)}" step="0.001" type="number" value="${escapeHtml(item.accepted_quantity || item.received_quantity)}"></label><label>Rejected<input data-field="rejected_quantity" required min="0" max="${escapeHtml(item.received_quantity)}" step="0.001" type="number" value="${escapeHtml(item.rejected_quantity || 0)}"></label><label>Reason<input data-field="rejection_reason" value="${escapeHtml(item.rejection_reason || '')}"></label></div>`).join('')}</div><div class="field-grid"><label>Inspection result<select name="inspection_status" required><option value="PASSED">Passed</option><option value="PARTIAL">Partial</option><option value="FAILED">Failed</option></select></label></div><p id="grnInspectionMessage" class="form-message" role="alert"></p><button class="primary-btn" type="submit">Post inspection to inventory</button></form>`;
+    const form = document.getElementById('grnInspectionForm');
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const message = document.getElementById('grnInspectionMessage');
+      const items = [...document.querySelectorAll('.inspection-row')].map(row => ({ grn_item_id: row.dataset.grnItem, accepted_quantity: Number(row.querySelector('[data-field="accepted_quantity"]').value), rejected_quantity: Number(row.querySelector('[data-field="rejected_quantity"]').value), rejection_reason: row.querySelector('[data-field="rejection_reason"]').value || undefined }));
+      const invalid = items.some((item, index) => item.accepted_quantity < 0 || item.rejected_quantity < 0 || item.accepted_quantity + item.rejected_quantity !== Number(grn.grn_item[index].received_quantity));
+      if (invalid) { message.textContent = 'Accepted plus rejected quantity must equal received quantity on every line.'; return; }
+      event.submitter.disabled = true;
+      message.textContent = 'Posting inspection…';
+      try { await workflowApi(`/procurement/grns/${grn.grn_id}/post`, { method: 'POST', body: JSON.stringify({ inspection_status: form.elements.inspection_status.value, items }) }); showToast('GRN posted and inventory refreshed'); await refreshProcurement(); renderInventory(); } catch (error) { message.textContent = workflowError(error); event.submitter.disabled = false; }
+    };
+  } catch (error) { pane.innerHTML = `<p class="empty-copy">${escapeHtml(workflowError(error))}</p>`; }
+}
+
+function renderInventory() { renderProcurementLoading('Loading inventory…'); Promise.all([workflowApi('/inventory/stocks?pageSize=100'), workflowApi('/inventory/items?pageSize=100'), workflowApi('/inventory/warehouses?pageSize=100'), workflowApi('/inventory/movements?pageSize=100&search=PURCHASE_RECEIPT')]).then(([stocks, items, warehouses, movements]) => { moduleStack.innerHTML = `<div class="workflow-view"><div class="workflow-title"><div><p class="eyebrow">Inventory control</p><h3>Stock balances and receipts</h3><small>Accepted GRN quantities become stock and PURCHASE_RECEIPT movements.</small></div><span class="status-pill good">Live API</span></div><section class="panel workflow-panel"><div class="workflow-filters"><input id="inventorySearch" placeholder="Search item or warehouse" aria-label="Search inventory"><select id="inventoryItemFilter" aria-label="Filter by item"><option value="">All items</option>${optionMarkup(items.data, 'inventory_item_id', item => `${item.item_code} · ${item.item_name}`)}</select><select id="inventoryWarehouseFilter" aria-label="Filter by warehouse"><option value="">All warehouses</option>${optionMarkup(warehouses.data, 'warehouse_id', warehouse => `${warehouse.warehouse_code} · ${warehouse.warehouse_name}`)}</select></div><div id="stockList" class="workflow-list"></div></section><section class="panel workflow-panel"><div class="section-head"><h3>Purchase receipts</h3><span class="status-pill good">${movements.meta.total}</span></div><div class="workflow-list">${movements.data.length ? movements.data.map(movement => `<div class="workflow-row"><div><strong>${escapeHtml(movement.inventory_item?.item_name || 'Item')}</strong><small>${escapeHtml(movement.warehouse?.warehouse_name || 'Warehouse')} · ${escapeHtml(movement.reference_type || '')} ${escapeHtml(movement.reference_id || '')} · ${new Date(movement.movement_date).toLocaleString()}</small></div><span class="amount">+${escapeHtml(movement.quantity)} ${escapeHtml(movement.inventory_item?.base_uom || '')}</span></div>`).join('') : '<p class="empty-copy">No PURCHASE_RECEIPT movements found yet.</p>'}</div></section></div>`; const renderStocks = () => { const search = document.getElementById('inventorySearch').value.trim().toLowerCase(); const item = document.getElementById('inventoryItemFilter').value; const warehouse = document.getElementById('inventoryWarehouseFilter').value; const filtered = stocks.data.filter(stock => (!search || `${stock.inventory_item.item_code} ${stock.inventory_item.item_name} ${stock.warehouse.warehouse_name}`.toLowerCase().includes(search)) && (!item || String(stock.inventory_item_id) === item) && (!warehouse || String(stock.warehouse_id) === warehouse)); document.getElementById('stockList').innerHTML = filtered.length ? filtered.map(stock => `<div class="workflow-row"><div><strong>${escapeHtml(stock.inventory_item.item_name)}</strong><small>${escapeHtml(stock.inventory_item.item_code)} · ${escapeHtml(stock.warehouse.warehouse_name)}${stock.inventory_lot ? ` · Lot ${escapeHtml(stock.inventory_lot.lot_number)}` : ''}</small></div><span class="amount">${escapeHtml(stock.quantity)} ${escapeHtml(stock.inventory_item.base_uom)}</span></div>`).join('') : '<p class="empty-copy">No stock balances match these filters.</p>'; }; renderStocks(); ['inventorySearch', 'inventoryItemFilter', 'inventoryWarehouseFilter'].forEach(id => document.getElementById(id).oninput = renderStocks); }).catch(error => renderProcurementLoading(workflowError(error))); }
 
 document.querySelectorAll("[data-action='enter-app']").forEach(button => {
   button.addEventListener("click", enterApp);
