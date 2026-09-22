@@ -82,13 +82,32 @@ function extractInvoice(text) {
   const total = amountAfterLabel(text, ['grand[ \\t]*total', 'invoice[ \\t]*total', 'net[ \\t]*(?:amount|total)', 'total[ \\t]*(?:amount|invoice)', '^total(?=[ \\t:])']);
   const vendorName = guessParty(text, ['supplier(?:[ \\t]*name)?', 'vendor(?:[ \\t]*name)?', 'seller', 'from']) || text.split('\n').slice(0, 5).find(line => /[a-z]/i.test(line) && !/invoice|gst|date|bill|\d{4}/i.test(line))?.trim() || null;
 
+  const normalizedInvoiceNumber = invoiceNumber?.match(/^[A-Z0-9][A-Z0-9/._-]*/i)?.[0] || null;
+  const buyer = { name: guessParty(text, ['buyer(?:\\s*name)?', 'bill\\s*to', 'consignee']), gstin: gstins[1] || null, address: null };
+  const vendor = { name: vendorName, gstin: gstins[0] || null, pan: text.match(PAN_PATTERN)?.[0]?.toUpperCase() || gstins[0]?.slice(2, 12) || null, address: null, phone: null, email: text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i)?.[0] || null };
+  const amounts = { subtotal, taxableAmount: subtotal, cgst, sgst, igst, discount, roundOff, total };
   return {
     documentType: 'PURCHASE_INVOICE',
-    invoiceNumber: invoiceNumber?.match(/^[A-Z0-9][A-Z0-9/._-]*/i)?.[0] || null,
+    invoiceNumber: normalizedInvoiceNumber,
+    invoice_number: normalizedInvoiceNumber,
     invoiceDate,
-    vendor: { name: vendorName, gstin: gstins[0] || null, pan: text.match(PAN_PATTERN)?.[0]?.toUpperCase() || gstins[0]?.slice(2, 12) || null, address: null, phone: null, email: text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || null },
-    buyer: { name: guessParty(text, ['buyer(?:\\s*name)?', 'bill\\s*to', 'consignee']), gstin: gstins[1] || null, address: null },
-    amounts: { subtotal, taxableAmount: subtotal, cgst, sgst, igst, discount, roundOff, total },
+    invoice_date: invoiceDate,
+    vendor,
+    vendor_name: vendor.name,
+    vendorGstin: vendor.gstin,
+    vendor_gstin: vendor.gstin,
+    buyer,
+    buyer_name: buyer.name,
+    buyer_gstin: buyer.gstin,
+    amounts,
+    subtotal,
+    taxable_amount: subtotal,
+    cgst,
+    sgst,
+    igst,
+    discount,
+    round_off: roundOff,
+    total,
     items: extractItems(text)
   };
 }
