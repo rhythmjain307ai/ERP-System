@@ -30,9 +30,10 @@ test('ten authenticated uploads preserve results across upload, detail, and list
   });
   mockMethod(prisma.document, 'findMany', async () => documents.map(doc => ({ ...doc, invoice_extraction_review: reviews.find(review => review.document_id === doc.document_id) })));
   mockMethod(prisma.invoice_extraction_review, 'findMany', async () => reviews);
+  mockMethod(prisma.invoice_extraction_review, 'findUnique', async ({ where }) => reviews.find(review => review.invoice_extraction_review_id === where.invoice_extraction_review_id) || null);
   mockMethod(prisma.invoice_extraction_review, 'update', async ({ where, data }) => {
     assert.ok(allowed.includes(data.extraction_status), 'must satisfy the existing database check constraint');
-    const review = reviews.find(review => review.document_id === where.document_id); Object.assign(review, data); return review;
+    const review = reviews.find(review => review.document_id === where.document_id || review.invoice_extraction_review_id === where.invoice_extraction_review_id); Object.assign(review, data); return review;
   });
   const auth = `Bearer ${createAuthToken(1)}`;
   try {
@@ -52,6 +53,11 @@ test('ten authenticated uploads preserve results across upload, detail, and list
       const original = await request(app).get(record.file_url).set('Authorization', auth);
       assert.equal(original.status, 200);
     }
+    const firstReview = reviews[0];
+    const originalConfidence = firstReview.confidence_score;
+    const reviewUpdate = await request(app).patch(`/api/documents/reviews/${firstReview.invoice_extraction_review_id}`).set('Authorization', auth).send({ reviewer_decision: 'NEEDS_CORRECTION', extracted_fields: firstReview.extracted_fields, review_notes: 'Manual verification' });
+    assert.equal(reviewUpdate.status, 200, JSON.stringify(reviewUpdate.body));
+    assert.equal(reviewUpdate.body.data.confidence_score, originalConfidence, 'manual review retains machine extraction confidence');
     assert.equal(documents.length, 10); assert.equal(reviews.length, 10);
     console.log('10/10 upload contract scenarios passed: 8 digital PDFs processed, 1 uncertain retained, 1 invalid PDF retained as failed. Database mocked; PDF engine real.');
   } finally { for (const doc of documents) await fs.unlink(path.join(uploadDirectory, doc.file_name)); }

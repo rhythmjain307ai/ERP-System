@@ -23,7 +23,7 @@ test('extracts common Indian invoice fields from OCR text', () => {
   assert.equal(invoice.invoiceDate, '2026-09-21');
   assert.equal(invoice.vendor.gstin, '27AAECA1234F1Z5');
   assert.equal(invoice.amounts.total, 100300);
-  assert.equal(invoice.items.length, 1);
+  assert.deepEqual(invoice.items, []);
 });
 
 test('normalizes snake_case and camelCase invoice fields without losing extracted data', () => {
@@ -37,7 +37,7 @@ test('normalizes snake_case and camelCase invoice fields without losing extracte
 });
 
 test('marks incomplete extraction as needing review', () => {
-  const result = validateInvoice(extractInvoice('unreadable scan'), 10);
+  const result = validateInvoice(extractInvoice('TAX INVOICE\nunreadable scan'), 10);
   assert.equal(result.status, 'UNDER_REVIEW');
   assert.ok(result.errors.some((error) => error.includes('Invoice number')));
 });
@@ -46,6 +46,14 @@ test('marks a supported complete invoice as processed when OCR is confident', ()
   const result = validateInvoice(extractInvoice(invoiceText), 99);
   assert.equal(result.errors.length, 0);
   assert.equal(result.status, 'EXTRACTED');
+});
+
+test('OCR ignores item and quantity tables without reducing invoice confidence', () => {
+  const withTable = extractInvoice(`${invoiceText}\nDescription Qty Rate Amount\nSteel Bar 100 KG 850 85000`);
+  const withoutTable = extractInvoice(invoiceText);
+  assert.deepEqual(withTable.items, []);
+  assert.equal(validateInvoice(withTable, 99).errors.some(error => /line item|quantity/i.test(error)), false);
+  assert.equal(validateInvoice(withTable, 99).confidence, validateInvoice(withoutTable, 99).confidence);
 });
 
 test('frontend summary renders a successful OCR extraction', () => {

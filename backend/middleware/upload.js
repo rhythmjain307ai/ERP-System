@@ -9,6 +9,7 @@ const uploadDirectory = path.resolve(__dirname, '..', 'uploads');
 fs.mkdirSync(uploadDirectory, { recursive: true });
 const allowedMimeTypes = new Set(['image/jpeg', 'image/png', 'application/pdf']);
 const extensions = { 'image/jpeg': '.jpg', 'image/png': '.png', 'application/pdf': '.pdf' };
+const maxUploadBytes = Number.isSafeInteger(Number(process.env.OCR_MAX_UPLOAD_BYTES)) && Number(process.env.OCR_MAX_UPLOAD_BYTES) > 0 ? Number(process.env.OCR_MAX_UPLOAD_BYTES) : 25 * 1024 * 1024;
 
 const storage = multer.diskStorage({
   destination: uploadDirectory,
@@ -17,7 +18,7 @@ const storage = multer.diskStorage({
 
 const documentUpload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  limits: { fileSize: maxUploadBytes, files: 1 },
   fileFilter: (req, file, callback) => {
     if (!allowedMimeTypes.has(file.mimetype)) return callback(new ValidationError('Unsupported file type. Upload a JPG, JPEG, PNG, or PDF.'));
     callback(null, true);
@@ -29,11 +30,13 @@ async function verifyUploadedFile(file) {
   const isJpeg = header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff;
   const isPng = header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
   const isPdf = header.subarray(0, 5).toString('ascii') === '%PDF-';
-  const valid = (file.mimetype === 'image/jpeg' && isJpeg) || (file.mimetype === 'image/png' && isPng) || (file.mimetype === 'application/pdf' && isPdf);
+  const extension = path.extname(file.originalname || '').toLowerCase();
+  const validExtension = file.mimetype === 'image/jpeg' ? ['.jpg', '.jpeg'].includes(extension) : file.mimetype === 'image/png' ? extension === '.png' : file.mimetype === 'application/pdf' ? extension === '.pdf' : false;
+  const valid = validExtension && ((file.mimetype === 'image/jpeg' && isJpeg) || (file.mimetype === 'image/png' && isPng) || (file.mimetype === 'application/pdf' && isPdf));
   if (!valid) {
     await fsp.unlink(file.path).catch(() => {});
-    throw new ValidationError('File contents do not match an allowed image or PDF format.');
+    throw new ValidationError('File extension, declared type, and contents must match a JPG, JPEG, PNG, or PDF format.');
   }
 }
 
-module.exports = { documentUpload, verifyUploadedFile, uploadDirectory };
+module.exports = { documentUpload, verifyUploadedFile, uploadDirectory, maxUploadBytes };

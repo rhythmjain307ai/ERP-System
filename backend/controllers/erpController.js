@@ -708,7 +708,7 @@ async function createDocument(req, res) {
   const result = await prisma.$transaction(async (tx) => {
     const document = await tx.document.create({ data: { document_type: req.body.document_type, reference_type: req.body.reference_type, reference_id: req.body.reference_id === undefined ? undefined : id(req.body.reference_id, 'reference_id'), file_name: req.body.file_name, file_url: req.body.file_url, mime_type: req.body.mime_type, uploaded_by: req.body.uploaded_by === undefined ? undefined : id(req.body.uploaded_by, 'uploaded_by'), metadata: req.body.metadata || {} } });
     if (!req.body.review) return document;
-    await tx.invoice_extraction_review.create({ data: { document_id: document.document_id, extraction_status: req.body.review.extraction_status, extraction_engine: req.body.review.extraction_engine, extraction_version: req.body.review.extraction_version, raw_ocr_output: req.body.review.raw_ocr_output, extracted_fields: req.body.review.extracted_fields, confidence_score: req.body.review.confidence_score === undefined ? undefined : number(req.body.review.confidence_score, 'confidence_score') } });
+    await tx.invoice_extraction_review.create({ data: { document_id: document.document_id, extraction_status: req.body.review.extraction_status, extraction_engine: req.body.review.extraction_engine, extraction_version: req.body.review.extraction_version, raw_ocr_output: req.body.review.raw_ocr_output, extracted_fields: req.body.review.extracted_fields, confidence_score: req.body.review.confidence_score === undefined ? undefined : Math.max(0, Math.min(1, number(req.body.review.confidence_score, 'confidence_score'))) } });
     return tx.document.findUnique({ where: { document_id: document.document_id }, include: { invoice_extraction_review: true } });
   });
   res.status(201).json({ success: true, data: result });
@@ -788,13 +788,14 @@ async function updateReview(req, res) {
   if (!existing) throw new NotFoundError('invoice extraction review');
   const decision = req.body.reviewer_decision;
   const fields = req.body.extracted_fields === undefined ? existing.extracted_fields : req.body.extracted_fields;
-  const validationInput = decision === 'APPROVED' && fields ? { ...fields, conflicts: [], fieldEvidence: {}, canonical: fields.canonical ? { ...fields.canonical, conflicts: [], field_evidence: {} } : undefined } : fields;
+  const validationInput = decision === 'APPROVED' && fields ? { ...fields, conflicts: [], canonical: fields.canonical ? { ...fields.canonical, conflicts: [] } : undefined } : fields;
   const validation = validateInvoice(validationInput, Number(existing.raw_ocr_output?.confidence || 0));
   if (existing.extraction_status === 'PROCESSING') throw new ApiError(409, 'Wait for extraction to finish.');
   if (decision && !['APPROVED', 'REJECTED', 'NEEDS_CORRECTION'].includes(decision)) throw new ValidationError('Invalid review decision.');
   const status = databaseStatus(decision === 'APPROVED' ? 'APPROVED' : decision === 'REJECTED' ? 'REJECTED' : validation.status);
   if (decision === 'APPROVED' && validation.errors.length) throw new ValidationError('Resolve validation issues before approving this document.', { validationErrors: validation.errors });
-  const review = await prisma.invoice_extraction_review.update({ where: { invoice_extraction_review_id: id(req.params.id) }, data: { extraction_status: status, extracted_fields: fields || undefined, validation_errors: validation.errors, confidence_score: validation.confidence, reviewer_id: req.user.user_id, reviewer_decision: decision || 'NEEDS_CORRECTION', reviewed_at: new Date(), review_notes: req.body.review_notes, updated_at: new Date() } });
+  const machineConfidence = existing.confidence_score == null ? validation.confidence : Math.max(0, Math.min(1, Number(existing.confidence_score)));
+  const review = await prisma.invoice_extraction_review.update({ where: { invoice_extraction_review_id: id(req.params.id) }, data: { extraction_status: status, extracted_fields: fields || undefined, validation_errors: validation.errors, confidence_score: Number.isFinite(machineConfidence) ? machineConfidence : 0, reviewer_id: req.user.user_id, reviewer_decision: decision || 'NEEDS_CORRECTION', reviewed_at: new Date(), review_notes: req.body.review_notes, updated_at: new Date() } });
   console.info('Document review updated', { reviewId: review.invoice_extraction_review_id.toString(), status });
   res.json({ success: true, data: publicReview(review) });
 }

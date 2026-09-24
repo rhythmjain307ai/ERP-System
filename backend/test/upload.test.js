@@ -8,13 +8,27 @@ const { verifyUploadedFile } = require('../middleware/upload');
 test('accepts a file whose bytes match its declared PNG type', async () => {
   const filePath = path.join(os.tmpdir(), `erp-upload-${Date.now()}.png`);
   await fs.writeFile(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-  await verifyUploadedFile({ path: filePath, mimetype: 'image/png' });
+  await verifyUploadedFile({ path: filePath, mimetype: 'image/png', originalname: 'scan.png' });
   await fs.unlink(filePath);
 });
 
 test('rejects and removes a file with spoofed image MIME type', async () => {
   const filePath = path.join(os.tmpdir(), `erp-upload-${Date.now()}.jpg`);
   await fs.writeFile(filePath, 'not an image');
-  await assert.rejects(verifyUploadedFile({ path: filePath, mimetype: 'image/jpeg' }));
+  await assert.rejects(verifyUploadedFile({ path: filePath, mimetype: 'image/jpeg', originalname: 'scan.jpg' }));
   await assert.rejects(fs.access(filePath));
+});
+
+test('rejects a valid image byte signature with a mismatched extension', async () => {
+  const filePath = path.join(os.tmpdir(), `erp-upload-${Date.now()}.png`);
+  await fs.writeFile(filePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  await assert.rejects(verifyUploadedFile({ path: filePath, mimetype: 'image/png', originalname: 'scan.jpg' }), /extension, declared type, and contents/);
+  await assert.rejects(fs.access(filePath));
+});
+
+test('accepts JPEG extension and signature when the declared MIME type matches', async () => {
+  const filePath = path.join(os.tmpdir(), `erp-upload-${Date.now()}.jpg`);
+  await fs.writeFile(filePath, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+  await verifyUploadedFile({ path: filePath, mimetype: 'image/jpeg', originalname: 'scan.jpeg' });
+  await fs.unlink(filePath);
 });

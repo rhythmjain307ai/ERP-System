@@ -13,6 +13,9 @@ const RULES = [
 function classifyPage(page) {
   const text = normalizeLabel(page?.text || '', false);
   const scores = RULES.map(([type, rules]) => ({ type, score: rules.reduce((sum, [pattern, weight]) => sum + (pattern.test(text) ? weight : 0), 0) })).sort((a, b) => b.score - a.score);
+  const supportingType = scores.find(item => ['E_WAY_BILL', 'E_INVOICE_REPORT', 'MATERIAL_RECEIPT_NOTE', 'GOODS_INWARD_REPORT', 'WEIGHBRIDGE_SLIP', 'DELIVERY_CHALLAN'].includes(item.type));
+  const taxInvoice = scores.find(item => item.type === 'TAX_INVOICE');
+  if (supportingType?.score >= 5 && supportingType.score >= (taxInvoice?.score || 0)) return { type: supportingType.type, confidence: Math.min(0.99, 0.5 + supportingType.score * 0.05), scores: scores.filter(item => item.score > 0) };
   const best = scores[0];
   return { type: best?.score >= 3 ? best.type : 'UNKNOWN', confidence: best?.score ? Math.min(0.99, 0.5 + best.score * 0.05) : 0, scores: scores.filter(item => item.score > 0) };
 }

@@ -47,7 +47,7 @@ test('preserves Tesseract word confidence and bounding boxes in normalized layou
 function word(text, x, y, width = 50) { return { text, confidence: 0.95, bbox: { x0: x, y0: y, x1: x + width, y1: y + 15 } }; }
 function line(words, y) { return { text: words.map(item => item.text).join(' '), confidence: 0.95, bbox: { x0: 0, y0: y, x1: 500, y1: y + 15 }, words }; }
 
-test('reconstructs a coordinate-based table and joins a multi-line description', () => {
+test('does not extract OCR item or quantity tables, including coordinate-based rows', () => {
   const page = { pageNumber: 1, width: 600, height: 800, confidence: 0.95, text: complete('Invoice No'), lines: [
     ...complete('Invoice No').split('\n').slice(0, 6).map((text, index) => line([word(text, 0, index * 20, 300)], index * 20)),
     line([word('Description', 10, 200, 80), word('HSN', 130, 200), word('Qty', 220, 200), word('UOM', 285, 200), word('Rate', 350, 200), word('Amount', 450, 200)], 200),
@@ -56,11 +56,8 @@ test('reconstructs a coordinate-based table and joins a multi-line description',
     line([word('Grand', 10, 300), word('Total', 70, 300), word('1180', 450, 300)], 300)
   ] };
   const fields = extractInvoice({ text: page.text, confidence: 95, pages: [page] });
-  assert.equal(fields.items.length, 1);
-  assert.match(fields.items[0].description, /NICKEL ALLOY.*BLUE ANNEALED/);
-  assert.equal(fields.items[0].hsnSac, '7505');
-  assert.equal(fields.items[0].quantity, 10);
-  assert.equal(fields.items[0].unitPrice, 100);
+  assert.deepEqual(fields.items, []);
+  assert.deepEqual(fields.canonical.items, []);
 });
 
 test('classifies related pages without treating every page as another invoice', () => {
@@ -103,4 +100,100 @@ test('weighbridge arithmetic is validated when all three weights are present', (
   const result = validateInvoice({ documentType: canonical.document_type, canonical }, 95);
   assert.equal(result.status, 'UNDER_REVIEW');
   assert.ok(result.errors.some(error => error.includes('Weighbridge')));
+});
+
+test('keeps PDF and OCR resource limits configurable at practical defaults', () => {
+  const { limits } = require('../lib/ocr/ocrService');
+  assert.ok(limits.maxPages >= 20);
+  assert.ok(limits.timeoutMs >= 90_000);
+  assert.ok(limits.maxConcurrentJobs >= 1);
+  assert.ok(limits.maxQueuedJobs >= 1);
+});
+
+test('MRN and goods-inward pages never produce OCR item tables', () => {
+  const invoiceText = complete('Invoice No');
+  const mrnText = 'MATERIAL RECEIPT NOTE\nMRN No: MRN-004\nDescription HSN Qty UOM\nSteel Bar 7214 10 KGS';
+  const page = (pageNumber, text) => ({ pageNumber, text, confidence: 0.95, lines: text.split('\n').map(value => ({ text: value, confidence: 0.95, bbox: null, words: [] })) });
+  const fields = extractInvoice({ text: `${invoiceText}\n\n${mrnText}`, confidence: 95, pages: [page(1, invoiceText), page(2, mrnText)] });
+  const relatedMrn = fields.relatedDocuments.find(item => item.type === 'MATERIAL_RECEIPT_NOTE');
+  assert.ok(relatedMrn);
+  assert.equal(Object.hasOwn(relatedMrn, 'items'), false);
+});
+
+test('uses explicit invoice labels and ignores generic reference and supporting identifiers', () => {
+  const base = complete('Invoice No').replace('FF/26/104', 'INV/26/0017');
+  const fields = extractInvoice(`${base}\nReference No: REF-77\nPO No: PO-998711\nE-Way Bill No: 252210659224\nAck No: 122633278943121\nVehicle No: MH08H1399\nGSTIN: 27AAECA1234F1Z5`);
+  assert.equal(fields.invoiceNumber, 'INV/26/0017');
+});
+
+test('does not promote generic reference, PO, e-way, or acknowledgement numbers to invoice number', () => {
+  for (const text of ['Reference No: REF-77', 'PO No: PO-998711', 'E-Way Bill No: 252210659224', 'Ack No: 122633278943121']) {
+    assert.equal(extractInvoice(`TAX INVOICE\n${text}`).invoiceNumber, null, text);
+  }
+});
+
+test('accepts punctuation variants and invoice numbers beginning with zero', () => {
+  for (const [label, value] of [['Invoice No :', '001/2026-27'], ['Invoice No.', 'A-123'], ['Invoice #', 'INV/008'], ['Inv.No:', 'XY-7']]) {
+    assert.equal(extractInvoice(`TAX INVOICE\n${label} ${value}`).invoiceNumber, value);
+  }
+});
+
+test('reads a value immediately below an exact invoice-number label', () => {
+  const text = `TAX INVOICE\nInvoice No\nINV-2026-0008\nInvoice Date: 21/09/2026`;
+  assert.equal(extractInvoice(text).invoiceNumber, 'INV-2026-0008');
+});
+
+test('does not use Document No from e-way or MRN supporting pages as the invoice number', () => {
+  for (const text of ['E-Way Bill\nDocument No: EWB-22', 'MATERIAL RECEIPT NOTE\nDocument No: MRN-22']) {
+    const fields = extractInvoice(text);
+    assert.equal(fields.invoiceNumber, null, text);
+  }
+});
+
+test('extracts a value to the right of its invoice label using bounding boxes', () => {
+  const text = `TAX INVOICE\nInvoice No\nInvoice Date: 21/09/2026\nSupplier: ABC Steel Industries\nTaxable Amount: 100\nGrand Total: 100`;
+  const lines = text.split('\n').map((value, index) => line([word(value, 0, index * 25, 280)], index * 25));
+  const label = line([word('Invoice', 10, 25), word('No', 75, 25)], 25);
+  const rightValue = line([word('0007/26-A', 170, 25, 100)], 25);
+  const page = { pageNumber: 1, text: `${text}\n0007/26-A`, confidence: 0.95, lines: [lines[0], label, lines[2], rightValue, ...lines.slice(3)] };
+  const fields = extractInvoice({ text: page.text, confidence: 95, pages: [page] });
+  assert.equal(fields.invoiceNumber, '0007/26-A');
+  assert.equal(fields.fieldEvidence['invoice.number'].relationship, 'spatial_right');
+});
+
+test('low OCR confidence on the invoice value lowers its field confidence', () => {
+  const reliable = extractInvoice(complete('Invoice No'));
+  const text = complete('Invoice No');
+  const lines = text.split('\n').map((value, index) => ({ text: value, confidence: value.startsWith('Invoice No') ? 0.2 : 0.98, bbox: null, words: [] }));
+  const uncertain = extractInvoice({ text, confidence: 95, pages: [{ pageNumber: 1, text, confidence: 0.98, lines }] });
+  assert.ok(uncertain.fieldEvidence['invoice.number'].confidence < reliable.fieldEvidence['invoice.number'].confidence);
+});
+
+test('uses a matching e-invoice Document No as corroboration and flags disagreement', () => {
+  const tax = `TAX INVOICE\nInvoice No: INV/26/0017\nInvoice Date: 12/09/2026\nSupplier: ABC Steel Industries\nTaxable Amount: 100\nGrand Total: 100`;
+  const report = (number, pageNumber) => ({ pageNumber, text: `E-Invoice Report\nDocument No: ${number}\nAck No: 122633278943121`, confidence: 0.98, lines: `E-Invoice Report\nDocument No: ${number}\nAck No: 122633278943121`.split('\n').map(text => ({ text, confidence: 0.98, bbox: null, words: [] })) });
+  const invoicePage = { pageNumber: 1, text: tax, confidence: 0.98, lines: tax.split('\n').map(text => ({ text, confidence: 0.98, bbox: null, words: [] })) };
+  const matching = extractInvoice({ text: `${tax}\n\nE-Invoice Report\nDocument No: INV/26/0017`, confidence: 98, pages: [invoicePage, report('INV/26/0017', 2)] });
+  assert.equal(matching.invoiceNumber, 'INV/26/0017');
+  assert.ok(matching.fieldEvidence['invoice.number'].confidence > 0.9);
+  const conflict = extractInvoice({ text: `${tax}\n\nE-Invoice Report\nDocument No: WRONG-8`, confidence: 98, pages: [invoicePage, report('WRONG-8', 2)] });
+  assert.equal(conflict.invoiceNumber, 'INV/26/0017');
+  assert.ok(conflict.conflicts.some(item => item.field === 'invoice.number'));
+  assert.equal(validateInvoice(conflict, 98).status, 'UNDER_REVIEW');
+});
+
+test('confidence is finite, normalized, penalizes missing critical evidence, and keeps empty OCR items neutral', () => {
+  const good = extractInvoice(complete('Invoice No'));
+  const goodScore = validateInvoice(good, 98).confidence;
+  const lowOcr = validateInvoice(good, 20).confidence;
+  const missing = validateInvoice(extractInvoice('TAX INVOICE\nGrand Total: 100'), 98).confidence;
+  for (const score of [goodScore, lowOcr, missing]) assert.ok(Number.isFinite(score) && score >= 0 && score <= 1);
+  assert.ok(goodScore > lowOcr);
+  assert.ok(goodScore > missing);
+});
+
+test('document review UI has no OCR line-item table or JSON editor', () => {
+  const source = require('node:fs').readFileSync(require('node:path').resolve(__dirname, '../../app/documents.js'), 'utf8');
+  assert.doesNotMatch(source, /Line items|Edit line items|name="items"/i);
+  assert.match(source, /confidenceLabel/);
 });

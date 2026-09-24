@@ -5,11 +5,19 @@ const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { ValidationError } = require('../errors');
 
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png']);
-const MAX_PAGES = 10;
-const OCR_TIMEOUT_MS = 90_000;
+const MAX_PAGES = positiveLimit(process.env.OCR_MAX_PDF_PAGES, 50);
+const OCR_TIMEOUT_MS = positiveLimit(process.env.OCR_TIMEOUT_MS, 120_000);
 const MIN_EMBEDDED_TEXT = 30;
 const LOW_QUALITY_CONFIDENCE = 0.62;
+const MAX_CONCURRENT_JOBS = positiveLimit(process.env.OCR_MAX_CONCURRENT_JOBS, 2);
+const MAX_QUEUED_JOBS = positiveLimit(process.env.OCR_MAX_QUEUED_JOBS, 20);
 let activeJobs = 0;
+const queuedJobs = [];
+
+function positiveLimit(value, fallback) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 const finite = value => Number.isFinite(Number(value)) ? Number(value) : 0;
 const clamp01 = value => Math.max(0, Math.min(1, finite(value) / 100));
@@ -144,9 +152,20 @@ function documentResult(pages, engine, warnings = []) {
 }
 
 async function extractText(filePath, mimeType) {
-  if (activeJobs >= 2) throw new ValidationError('The local OCR engine is busy. Your document is saved; use Retry extraction shortly.');
-  activeJobs++;
-  try { return await extractDocument(filePath, mimeType); } finally { activeJobs--; }
+  await acquireJob();
+  try { return await extractDocument(filePath, mimeType); } finally { releaseJob(); }
+}
+
+async function acquireJob() {
+  if (activeJobs < MAX_CONCURRENT_JOBS) { activeJobs++; return; }
+  if (queuedJobs.length >= MAX_QUEUED_JOBS) throw new ValidationError('The local OCR queue is full. Your document is saved; retry extraction in a few minutes.');
+  await new Promise(resolve => queuedJobs.push(resolve));
+}
+
+function releaseJob() {
+  const next = queuedJobs.shift();
+  if (next) next();
+  else activeJobs = Math.max(0, activeJobs - 1);
 }
 
 async function extractDocument(filePath, mimeType) {
@@ -199,4 +218,4 @@ async function extractDocument(filePath, mimeType) {
   } finally { await parser.destroy(); }
 }
 
-module.exports = { extractText, extractDocument, normalizeTesseractPage, preprocessImage, IMAGE_TYPES };
+module.exports = { extractText, extractDocument, normalizeTesseractPage, preprocessImage, IMAGE_TYPES, limits: { maxPages: MAX_PAGES, timeoutMs: OCR_TIMEOUT_MS, maxConcurrentJobs: MAX_CONCURRENT_JOBS, maxQueuedJobs: MAX_QUEUED_JOBS } };

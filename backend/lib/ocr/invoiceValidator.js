@@ -20,13 +20,12 @@ function canonicalFrom(extracted) {
   extracted = extracted && typeof extracted === 'object' ? extracted : {};
   const source = extracted.canonical || {};
   const amounts = extracted.amounts || {};
-  const legacyItems = Array.isArray(extracted.items) ? extracted.items.map(item => ({ description: item.description, hsn_sac: item.hsn_sac ?? item.hsnSac, quantity: item.quantity, unit: item.unit, unit_price: item.unit_price ?? item.unitPrice, discount: item.discount, taxable_amount: item.taxable_amount ?? item.taxableAmount, gst_rate: item.gst_rate ?? item.gstRate, cgst: item.cgst, sgst: item.sgst, igst: item.igst, cess: item.cess, line_total: item.line_total ?? item.lineTotal })) : [];
   return {
     document_type: extracted.documentType || source.document_type || 'PURCHASE_INVOICE',
     invoice: { ...(source.invoice || {}), number: extracted.invoiceNumber ?? extracted.invoice_number ?? source.invoice?.number ?? null, date: extracted.invoiceDate ?? extracted.invoice_date ?? source.invoice?.date ?? null, po_number: extracted.poNumber ?? source.invoice?.po_number ?? null },
     supplier: { ...(source.supplier || {}), ...(extracted.vendor || {}), name: extracted.vendor?.name ?? extracted.vendor_name ?? source.supplier?.name ?? null, gstin: extracted.vendor?.gstin ?? extracted.vendor_gstin ?? extracted.vendorGstin ?? source.supplier?.gstin ?? null },
     buyer: { ...(source.buyer || {}), ...(extracted.buyer || {}) },
-    items: legacyItems.length ? legacyItems : source.items || [],
+    items: [],
     taxes: { ...(source.taxes || {}), cgst: amounts.cgst ?? extracted.cgst ?? source.taxes?.cgst ?? null, sgst: amounts.sgst ?? extracted.sgst ?? source.taxes?.sgst ?? null, igst: amounts.igst ?? extracted.igst ?? source.taxes?.igst ?? null, cess: amounts.cess ?? extracted.cess ?? source.taxes?.cess ?? null },
     totals: { ...(source.totals || {}), subtotal: amounts.subtotal ?? extracted.subtotal ?? source.totals?.subtotal ?? null, taxable_amount: amounts.taxableAmount ?? extracted.taxable_amount ?? source.totals?.taxable_amount ?? null, discount: amounts.discount ?? extracted.discount ?? source.totals?.discount ?? null, other_charges: amounts.otherCharges ?? source.totals?.other_charges ?? null, round_off: amounts.roundOff ?? extracted.round_off ?? source.totals?.round_off ?? null, grand_total: amounts.total ?? extracted.total ?? source.totals?.grand_total ?? null },
     related_documents: extracted.relatedDocuments || source.related_documents || [],
@@ -45,26 +44,11 @@ function validateInvoice(extracted, ocrConfidence = 0) {
     if (!canonical.supplier.name) errors.push('Supplier/vendor name was not detected.');
     if (!present(canonical.totals.grand_total)) errors.push('Invoice grand total was not detected.');
     if (!present(canonical.totals.taxable_amount) && !present(canonical.totals.subtotal)) errors.push('Subtotal/taxable value was not detected.');
-    if (!canonical.items.length) errors.push('No line items were detected.');
   }
   for (const [role, party] of [['Supplier', canonical.supplier], ['Buyer', canonical.buyer]]) if (party?.gstin && !validateGstin(party.gstin)) errors.push(`${role} GSTIN has an invalid structure or state/PAN component.`);
   const total = number(canonical.totals.grand_total);
   const taxable = number(canonical.totals.taxable_amount ?? canonical.totals.subtotal);
   if (present(canonical.totals.grand_total) && (!Number.isFinite(total) || total <= 0)) errors.push('Grand total must be a positive number.');
-  for (const [index, item] of canonical.items.entries()) {
-    const quantity = number(item.quantity);
-    const unitPrice = number(item.unit_price);
-    const lineBase = number(item.taxable_amount ?? item.line_total);
-    if (!item.description || !(quantity > 0)) errors.push(`Line item ${index + 1} is missing a description or positive quantity.`);
-    if (quantity > 0 && unitPrice !== null && lineBase !== null && !near(quantity * unitPrice - Number(item.discount || 0), lineBase)) errors.push(`Line item ${index + 1} quantity × unit price does not reconcile with its taxable/line amount.`);
-    if (lineBase !== null && present(item.gst_rate)) {
-      const expectedTax = lineBase * Number(item.gst_rate) / 100;
-      const tax = [item.cgst, item.sgst, item.igst, item.cess].filter(present).reduce((sum, value) => sum + Number(value), 0);
-      if (tax && !near(tax, expectedTax)) errors.push(`Line item ${index + 1} GST does not reconcile with the detected rate.`);
-    }
-  }
-  const lineAmounts = canonical.items.map(item => number(item.taxable_amount ?? item.line_total));
-  if (taxable !== null && lineAmounts.length && lineAmounts.every(value => value !== null) && !near(lineAmounts.reduce((sum, value) => sum + value, 0), taxable)) errors.push('The sum of detected line amounts does not match the taxable amount.');
   if (taxable !== null && total !== null) {
     const expected = taxable + Number(canonical.taxes.cgst || 0) + Number(canonical.taxes.sgst || 0) + Number(canonical.taxes.igst || 0) + Number(canonical.taxes.cess || 0) + Number(canonical.totals.other_charges || 0) - Number(canonical.totals.discount || 0) + Number(canonical.totals.round_off || 0);
     if (!near(total, expected)) errors.push('Grand total does not reconcile with taxable value, taxes, charges, discount, and round-off.');
@@ -80,10 +64,22 @@ function validateInvoice(extracted, ocrConfidence = 0) {
     if (evidence && evidence.confidence < 0.72) errors.push(`${field} has low extraction confidence.`);
   }
   const deduplicated = [...new Set(errors)];
-  const evidence = Object.values(canonical.field_evidence).filter(item => item && Number.isFinite(Number(item.confidence)));
-  const fieldConfidence = evidence.length ? evidence.reduce((sum, item) => sum + Number(item.confidence), 0) / evidence.length : 0;
-  const completeness = invoiceLike ? [canonical.invoice.number, canonical.invoice.date, canonical.supplier.name, canonical.totals.grand_total, canonical.items.length].filter(Boolean).length / 5 : canonical.related_documents.length ? 0.8 : 0.2;
-  const confidence = Math.max(0, Math.min(1, fieldConfidence * 0.45 + completeness * 0.35 + Math.max(0, Math.min(100, Number(ocrConfidence) || 0)) / 100 * 0.20));
+  const critical = invoiceLike ? [
+    ['invoice.number', canonical.invoice.number, 0.32],
+    ['invoice.date', canonical.invoice.date, 0.20],
+    ['supplier.name', canonical.supplier.name, 0.19],
+    ['totals.grand_total', canonical.totals.grand_total, 0.24],
+    ['totals.taxable_amount', canonical.totals.taxable_amount ?? canonical.totals.subtotal, 0.05]
+  ] : [];
+  const fieldScore = critical.reduce((sum, [key, value, weight]) => {
+    const raw = Number(canonical.field_evidence[key]?.confidence);
+    const confidence = Number.isFinite(raw) ? Math.max(0, Math.min(1, raw)) : (present(value) ? 0.5 : 0);
+    return sum + confidence * weight;
+  }, 0);
+  const rawOcrConfidence = Number(ocrConfidence);
+  const normalizedOcrConfidence = Number.isFinite(rawOcrConfidence) ? Math.max(0, Math.min(1, rawOcrConfidence > 1 ? rawOcrConfidence / 100 : rawOcrConfidence)) : 0;
+  const conflictPenalty = canonical.conflicts.length ? 0.22 : 0;
+  const confidence = Number(Math.max(0, Math.min(1, fieldScore * 0.82 + normalizedOcrConfidence * 0.18 - conflictPenalty)).toFixed(4));
   return { confidence, errors: deduplicated, status: deduplicated.length || confidence < 0.85 ? 'UNDER_REVIEW' : 'EXTRACTED', canonical };
 }
 

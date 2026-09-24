@@ -6,6 +6,11 @@ const { ValidationError } = require('../errors');
 const normalize = value => String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 function sameInvoice(a, b) {
   if (!a?.invoiceNumber || !b?.invoiceNumber || a.amounts?.total == null || b.amounts?.total == null) return false;
+  const evidenceFor = fields => fields?.fieldEvidence?.['invoice.number'] || fields?.canonical?.field_evidence?.['invoice.number'];
+  const leftEvidence = evidenceFor(a), rightEvidence = evidenceFor(b);
+  if (!leftEvidence || !rightEvidence || !Number.isFinite(Number(leftEvidence.confidence)) || !Number.isFinite(Number(rightEvidence.confidence)) || Number(leftEvidence.confidence) < 0.85 || Number(rightEvidence.confidence) < 0.85) return false;
+  const conflicts = fields => [...(fields.conflicts || []), ...(fields.canonical?.conflicts || [])];
+  if (conflicts(a).some(conflict => conflict.field === 'invoice.number') || conflicts(b).some(conflict => conflict.field === 'invoice.number')) return false;
   const vendorMatches = a.vendor?.gstin && b.vendor?.gstin ? normalize(a.vendor.gstin) === normalize(b.vendor.gstin) : normalize(a.vendor?.name) && normalize(a.vendor?.name) === normalize(b.vendor?.name);
   return Boolean(vendorMatches && normalize(a.invoiceNumber) === normalize(b.invoiceNumber) && Math.abs(Number(a.amounts.total) - Number(b.amounts.total)) < 0.01);
 }

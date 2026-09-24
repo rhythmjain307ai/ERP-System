@@ -18,17 +18,18 @@ test('digital PDF extracts text and camelCase invoice fields with real PDF engin
     assert.equal(fields.invoiceNumber, 'INV-PDF-101');
     assert.equal(fields.amounts.total, 100300);
     assert.equal(fields.amounts.cgst, 7650);
-    assert.equal(fields.items[0].unitPrice, 850);
+    assert.deepEqual(fields.items, []);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
-test('duplicate comparison uses GSTIN or normalized vendor plus number and total', () => {
+test('duplicate comparison requires reliable invoice evidence, vendor, number, and total', () => {
   const a = extractInvoice(invoiceText('INV-101'));
   assert.equal(sameInvoice(a, { ...a, vendor: { name: 'Different OCR spelling', gstin: a.vendor.gstin } }), true);
   assert.equal(sameInvoice(a, { ...a, invoiceNumber: 'INV-102' }), false);
+  assert.equal(sameInvoice({ ...a, fieldEvidence: {}, canonical: { ...a.canonical, field_evidence: {} } }, a), false);
 });
 test('tax percentages are not tax amounts and ungrouped large totals stay intact', () => {
   const fields = extractInvoice(invoiceText('INV-2026/001'));
   assert.equal(fields.amounts.cgst, 7650);
-  assert.equal(fields.items[0].lineTotal, 85000);
+  assert.deepEqual(fields.items, []);
   assert.equal(fields.vendor.pan, 'AAECA1234F');
 });

@@ -10,7 +10,8 @@ function errorHandler(error, req, res, next) {
 
   if (error instanceof multer.MulterError) {
     status = error.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
-    message = error.code === 'LIMIT_FILE_SIZE' ? 'File is too large. The maximum upload size is 10 MB.' : 'Invalid file upload.';
+    const maximumBytes = Number.isSafeInteger(Number(process.env.OCR_MAX_UPLOAD_BYTES)) && Number(process.env.OCR_MAX_UPLOAD_BYTES) > 0 ? Number(process.env.OCR_MAX_UPLOAD_BYTES) : 25 * 1024 * 1024;
+    message = error.code === 'LIMIT_FILE_SIZE' ? `File is too large. The maximum upload size is ${Math.round(maximumBytes / (1024 * 1024))} MB.` : 'Invalid file upload.';
   } else if (error instanceof Prisma.PrismaClientKnownRequestError) {
     if (error.code === 'P2025') { status = 404; message = 'Record not found'; }
     else if (error.code === 'P2002') { status = 409; message = 'A record with this unique value already exists'; details = error.meta; }
