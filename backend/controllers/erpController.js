@@ -788,7 +788,8 @@ async function updateReview(req, res) {
   if (!existing) throw new NotFoundError('invoice extraction review');
   const decision = req.body.reviewer_decision;
   const fields = req.body.extracted_fields === undefined ? existing.extracted_fields : req.body.extracted_fields;
-  const validation = validateInvoice(fields, Number(existing.raw_ocr_output?.confidence || 0));
+  const validationInput = decision === 'APPROVED' && fields ? { ...fields, conflicts: [], fieldEvidence: {}, canonical: fields.canonical ? { ...fields.canonical, conflicts: [], field_evidence: {} } : undefined } : fields;
+  const validation = validateInvoice(validationInput, Number(existing.raw_ocr_output?.confidence || 0));
   if (existing.extraction_status === 'PROCESSING') throw new ApiError(409, 'Wait for extraction to finish.');
   if (decision && !['APPROVED', 'REJECTED', 'NEEDS_CORRECTION'].includes(decision)) throw new ValidationError('Invalid review decision.');
   const status = databaseStatus(decision === 'APPROVED' ? 'APPROVED' : decision === 'REJECTED' ? 'REJECTED' : validation.status);

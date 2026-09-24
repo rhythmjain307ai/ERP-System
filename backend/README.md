@@ -99,7 +99,9 @@ Purchase orders, GRNs, customer orders, and deliveries use the same `items` shap
 
 Open `http://localhost:4000` after starting the backend and use **Documents → Scan / Upload**. The backend accepts JPG, JPEG, PNG, and PDF files up to 10 MB. It saves the binary outside the source code in `backend/uploads/` (which is ignored by Git), stores only metadata in PostgreSQL, and serves originals through the authenticated `GET /api/documents/:id/file` route.
 
-For JPG/PNG, Tesseract.js performs local OCR; searchable PDFs use local text extraction; no cloud OCR key is required. The result is stored as raw OCR text and passed to a deterministic Indian-invoice parser for invoice number, date, GSTIN, vendor, tax totals, and potential item lines. Validation then calculates a confidence score. Complete extraction produces `EXTRACTED`; missing or inconsistent fields produce `UNDER_REVIEW`; OCR data is never automatically approved. Image-only PDF scans are securely uploaded and marked for manual review because this service does not render PDF pages.
+For JPG/PNG, Tesseract.js performs local OCR; searchable PDFs use local text extraction; scanned PDF pages are rendered locally and passed through Tesseract. No cloud OCR key is required. OCR preserves page, line, word, confidence, and bounding-box data. Low-quality pages receive one adaptive grayscale/contrast retry; clean pages are not repeatedly processed.
+
+The deterministic parser classifies invoice, e-invoice, e-way bill, delivery challan, weighbridge, MRN, and goods-inward pages; maps semantic label variants; scores field candidates; reconstructs coordinate-based tables; and retains field-level provenance. The canonical extraction is exposed alongside compatibility fields used by the existing review UI. Validation checks GSTIN structure, conflicting identifiers, line arithmetic, table totals, tax totals, grand totals, and weighbridge arithmetic. Complete high-confidence extraction produces `EXTRACTED`; missing, low-confidence, contradictory, handwritten, or invalid evidence produces `UNDER_REVIEW`. OCR data is never automatically approved or posted into accounting/inventory workflows.
 
 The Documents UI uses the existing bearer-token authorization. In development, generate a token for a seeded user with `createAuthToken` from `middleware/auth.js`, then paste the token into the Documents connection prompt. A production ERP login should supply that same existing token in `localStorage.erpAuthToken`; the OCR feature does not add a second authentication system.
 
@@ -114,6 +116,14 @@ GRN posting creates inventory stock and `PURCHASE_RECEIPT` stock movements. Deli
 ```bash
 npm test
 ```
+
+The private real-document corpus is intentionally not committed. To run the five-file regression suite, point `OCR_REAL_FIXTURES_DIR` at the directory containing the exact reviewed PDFs and run:
+
+```bash
+OCR_REAL_FIXTURES_DIR=/path/to/private/pdfs npm run test:ocr:real
+```
+
+The corpus runner verifies each PDF's SHA-256 fingerprint before OCR so similarly named or modified files cannot silently change the expected results. On PowerShell, set the variable with `$env:OCR_REAL_FIXTURES_DIR = 'C:\path\to\private\pdfs'` before running the command.
 
 `npm test` always runs `test/api.test.js` through Node's test runner and does not depend on shell glob behavior. Integration tests use only `TEST_DATABASE_URL`; they seed the minimum company, customer, vendor, inventory item, role, permissions, user, and workflow records, then clean up created records after the run.
 

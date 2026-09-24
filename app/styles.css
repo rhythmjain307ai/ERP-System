@@ -1001,6 +1001,9 @@ h3 {
 .document-form label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; font-weight: 700; }
 .document-form input, .document-form textarea { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
 .document-form textarea, .document-form label:last-of-type, .validation-warning, .review-actions { grid-column: 1 / -1; }
+.field-evidence { color: var(--success); font-size: 10px; font-weight: 600; }
+.field-evidence.uncertain { color: var(--warning); }
+.page-types { color: var(--muted); font-size: 12px; }
 .validation-warning { padding: 10px; border-radius: 10px; color: #92400e; background: #fffbeb; font-size: 12px; }
 .validation-warning ul { margin: 6px 0 0; padding-left: 18px; }
 .review-actions { display: flex; gap: 8px; flex-wrap: wrap; }
