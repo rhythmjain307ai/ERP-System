@@ -22,13 +22,17 @@ test('requires authentication for writes', async () => {
   assert.equal(response.status, 401);
 });
 
-test('requires authentication for procurement and inventory reads', async () => {
+test('requires authentication for workflow and inventory reads', async () => {
   const responses = await Promise.all([
     request(app).get('/api/procurement/purchase-orders'),
     request(app).get('/api/procurement/grns'),
-    request(app).get('/api/inventory/stocks')
+    request(app).get('/api/inventory/stocks'),
+    request(app).get('/api/inventory/movements'),
+    request(app).get('/api/sales/orders'),
+    request(app).get('/api/sales/invoices'),
+    request(app).get('/api/sales/deliveries')
   ]);
-  assert.deepEqual(responses.map(response => response.status), [401, 401, 401]);
+  assert.deepEqual(responses.map(response => response.status), [401, 401, 401, 401, 401, 401, 401]);
 });
 
 test('returns 404 for unknown routes', async () => {
@@ -163,6 +167,63 @@ async function createDeliveryFixture(options = {}) {
 async function dispatch(deliveryId) {
   return request(app).post(`/api/sales/deliveries/${deliveryId}/dispatch`).set('Authorization', context.auth).send({});
 }
+
+test('lists and retrieves sales workflow records with their related data', { skip: !integration }, async () => {
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const order = await request(app).post('/api/sales/orders').set('Authorization', context.auth).send({
+    order_number: `SO-READ-${suffix}`,
+    customer_id: context.customerId,
+    items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', ordered_quantity: 1 }]
+  });
+  assert.equal(order.status, 201);
+  context.created.orderIds.push(BigInt(order.body.data.customer_order_id));
+
+  const invoice = await request(app).post('/api/sales/invoices').set('Authorization', context.auth).send({
+    invoice_number: `INV-READ-${suffix}`,
+    customer_id: context.customerId,
+    customer_order_id: order.body.data.customer_order_id,
+    items: [{ inventory_item_id: context.inventoryItemId, description: 'Read workflow item', uom: 'EA', quantity: 1 }]
+  });
+  assert.equal(invoice.status, 201);
+  context.created.invoiceIds.push(BigInt(invoice.body.data.sales_invoice_id));
+
+  await resetStock(2);
+  const delivery = await createDeliveryFixture({
+    customerOrderId: order.body.data.customer_order_id,
+    customerOrderItemId: order.body.data.customer_order_item[0].customer_order_item_id,
+    salesInvoiceId: invoice.body.data.sales_invoice_id,
+    salesInvoiceItemId: invoice.body.data.sales_invoice_item[0].sales_invoice_item_id,
+    quantity: 1
+  });
+  assert.equal((await dispatch(delivery.deliveryId)).status, 200);
+
+  const [orders, orderDetail, invoices, invoiceDetail, deliveries, deliveryDetail, movements] = await Promise.all([
+    request(app).get('/api/sales/orders').query({ search: `SO-READ-${suffix}`, pageSize: 1 }).set('Authorization', context.auth),
+    request(app).get(`/api/sales/orders/${order.body.data.customer_order_id}`).set('Authorization', context.auth),
+    request(app).get('/api/sales/invoices').query({ search: `INV-READ-${suffix}`, pageSize: 1 }).set('Authorization', context.auth),
+    request(app).get(`/api/sales/invoices/${invoice.body.data.sales_invoice_id}`).set('Authorization', context.auth),
+    request(app).get('/api/sales/deliveries').query({ search: delivery.response.body.data.delivery_number, pageSize: 1 }).set('Authorization', context.auth),
+    request(app).get(`/api/sales/deliveries/${delivery.deliveryId}`).set('Authorization', context.auth),
+    request(app).get('/api/inventory/movements').query({ movement_type: 'SALE_ISSUE', item_id: context.inventoryItemId, pageSize: 1 }).set('Authorization', context.auth)
+  ]);
+
+  for (const response of [orders, orderDetail, invoices, invoiceDetail, deliveries, deliveryDetail, movements]) assert.equal(response.status, 200);
+  assert.equal(orders.body.meta.total, 1);
+  assert.equal(orders.body.data[0].customer_order_item.length, 1);
+  assert.equal(orderDetail.body.data.customer.customer_id, context.customerId);
+  assert.equal(orderDetail.body.data.delivery.length, 1);
+  assert.equal(invoices.body.meta.total, 1);
+  assert.equal(invoices.body.data[0].sales_invoice_item.length, 1);
+  assert.equal(invoiceDetail.body.data.customer.customer_id, context.customerId);
+  assert.equal(invoiceDetail.body.data.delivery.length, 1);
+  assert.equal(deliveries.body.meta.total, 1);
+  assert.equal(deliveries.body.data[0].status, 'DISPATCHED');
+  assert.equal(deliveryDetail.body.data.customer_order.order_number, `SO-READ-${suffix}`);
+  assert.equal(deliveryDetail.body.data.sales_invoice.invoice_number, `INV-READ-${suffix}`);
+  assert.equal(deliveryDetail.body.data.delivery_item.length, 1);
+  assert.equal(movements.body.data[0].movement_type, 'SALE_ISSUE');
+  assert.equal(movements.body.data[0].reference_id, delivery.deliveryId.toString());
+});
 
 async function createProductionFixture({ lotTrackedOutput = false, plannedQuantity = 5, componentQuantity = 1, secondComponent = false } = {}) {
   const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
