@@ -2,6 +2,13 @@ const express = require('express');
 const asyncHandler = require('../lib/asyncHandler');
 const makeCrud = require('../controllers/crudController');
 const workflow = require('../controllers/erpController');
+const accountsPayable = require('../controllers/accountsPayableController');
+const payments = require('../controllers/paymentController');
+const financeConfig = require('../controllers/financeConfigController');
+const reversals = require('../controllers/reversalController');
+const vendorLedger = require('../controllers/vendorLedgerController');
+const financialReports = require('../controllers/financialReportsController');
+const bankReconciliation = require('../controllers/bankReconciliationController');
 const weighbridge = require('../controllers/weighbridgeController');
 const { requireAuth, requirePermission } = require('../middleware/auth');
 const { documentUpload } = require('../middleware/upload');
@@ -49,6 +56,31 @@ function createRoutes() {
   const inventory = express.Router(); inventory.get('/stocks', requireAuth, asyncHandler(workflow.listInventoryStocks)); inventory.get('/movements', requireAuth, asyncHandler(workflow.listInventoryMovements)); inventory.use('/items', crudRouter(configs['inventory-items'], 'inventory.write')); inventory.use('/warehouses', crudRouter(configs.warehouses, 'inventory.write')); inventory.use('/lots', crudRouter(configs['inventory-lots'], 'inventory.write')); inventory.use('/movements', crudRouter(configs['stock-movements'], 'inventory.write'));
   const procurement = express.Router(); procurement.get('/purchase-orders', requireAuth, asyncHandler(workflow.listPurchaseOrders)); procurement.get('/purchase-orders/:id', requireAuth, asyncHandler(workflow.getPurchaseOrder)); procurement.get('/grns', requireAuth, asyncHandler(workflow.listGrns)); procurement.get('/grns/:id', requireAuth, asyncHandler(workflow.getGrn)); procurement.post('/requisitions', requireAuth, requirePermission('procurement.write'), asyncHandler(workflow.createRequisition)); procurement.post('/purchase-orders', requireAuth, requirePermission('procurement.write'), asyncHandler(workflow.createPurchaseOrder)); procurement.post('/grns', requireAuth, requirePermission('procurement.write'), asyncHandler(workflow.createGrn)); procurement.post('/grns/:id/post', requireAuth, requirePermission('inventory.write'), asyncHandler(workflow.postGrn)); procurement.post('/vendor-invoices', requireAuth, requirePermission('procurement.write'), asyncHandler(workflow.createVendorInvoice)); procurement.post('/vendor-invoices/:id/book', requireAuth, requirePermission('procurement.write'), asyncHandler(workflow.bookVendorInvoice)); procurement.post('/vendor-invoices/:id/cancel', requireAuth, requirePermission('procurement.write'), asyncHandler(workflow.cancelVendorInvoice)); procurement.get('/vendor-invoices', requireAuth, requirePermission('procurement.write'), asyncHandler(workflow.listVendorInvoices)); procurement.get('/vendor-invoices/:id', requireAuth, requirePermission('procurement.write'), asyncHandler(workflow.getVendorInvoice));
   const sales = express.Router(); sales.get('/orders', requireAuth, asyncHandler(workflow.listCustomerOrders)); sales.get('/orders/:id', requireAuth, asyncHandler(workflow.getCustomerOrder)); sales.post('/orders', requireAuth, requirePermission('sales.write'), asyncHandler(workflow.createCustomerOrder)); sales.get('/invoices', requireAuth, asyncHandler(workflow.listSalesInvoices)); sales.get('/invoices/:id', requireAuth, asyncHandler(workflow.getSalesInvoice)); sales.post('/invoices', requireAuth, requirePermission('sales.write'), asyncHandler(workflow.createSalesInvoice)); sales.get('/deliveries', requireAuth, asyncHandler(workflow.listDeliveries)); sales.get('/deliveries/:id', requireAuth, asyncHandler(workflow.getDelivery)); sales.post('/deliveries', requireAuth, requirePermission('sales.write'), asyncHandler(workflow.createDelivery)); sales.post('/deliveries/:id/dispatch', requireAuth, requirePermission('inventory.write'), asyncHandler(workflow.dispatchDelivery));
+  procurement.get('/accounts-payable', requireAuth, requirePermission('procurement.write'), asyncHandler(accountsPayable.list));
+  procurement.post('/payments', requireAuth, requirePermission('procurement.write'), asyncHandler(payments.create));
+  procurement.put('/finance-config/:companyId', requireAuth, requirePermission('procurement.write'), asyncHandler(financeConfig.configure));
+  procurement.patch('/bank-accounts/:id/gl-account', requireAuth, requirePermission('procurement.write'), asyncHandler(financeConfig.mapBank));
+  procurement.post('/payments/:id/allocations', requireAuth, requirePermission('procurement.write'), asyncHandler(payments.allocate));
+  procurement.post('/vendor-invoices/:id/reverse', requireAuth, requirePermission('procurement.write'), asyncHandler(reversals.invoice));
+  procurement.post('/payments/:id/reverse', requireAuth, requirePermission('procurement.write'), asyncHandler(reversals.payment));
+  procurement.post('/journals/:id/reverse', requireAuth, requirePermission('procurement.write'), asyncHandler(reversals.journal));
+  procurement.get('/vendors/:vendorId/ledger', requireAuth, requirePermission('procurement.write'), asyncHandler(vendorLedger.get));
+  procurement.get('/vendors/:vendorId/statement', requireAuth, requirePermission('procurement.write'), asyncHandler(vendorLedger.get));
+  procurement.post('/bank-transactions', requireAuth, requirePermission('procurement.write'), asyncHandler(bankReconciliation.create));
+  procurement.post('/bank-transactions/:id/match', requireAuth, requirePermission('procurement.write'), asyncHandler(bankReconciliation.match));
+  procurement.post('/bank-transactions/:id/reconcile', requireAuth, requirePermission('procurement.write'), asyncHandler(bankReconciliation.reconcile));
+  procurement.post('/bank-transactions/:id/unmatch', requireAuth, requirePermission('procurement.write'), asyncHandler(bankReconciliation.unmatch));
+  procurement.get('/bank-reconciliation', requireAuth, requirePermission('procurement.write'), asyncHandler(bankReconciliation.report));
+  procurement.get('/accounts-payable/aging', requireAuth, requirePermission('procurement.write'), asyncHandler(accountsPayable.aging));
+  procurement.get('/accounts-payable/:id', requireAuth, requirePermission('procurement.write'), asyncHandler(accountsPayable.get));
+  procurement.get('/vendors/:vendorId/accounts-payable', requireAuth, requirePermission('procurement.write'), asyncHandler(accountsPayable.list));
+  for (const [path, handler] of Object.entries({
+    'vendor-outstanding': financialReports.outstanding, 'purchase-register': financialReports.purchases,
+    'gst-purchase-register': financialReports.gst, 'cash-flow-impact': financialReports.cashFlow,
+    'trial-balance': financialReports.trialBalance, 'general-ledger': financialReports.generalLedger,
+    'accounts-payable-aging': accountsPayable.aging
+  })) procurement.get('/reports/' + path, requireAuth, requirePermission('procurement.write'), asyncHandler(handler));
+  procurement.get('/reports/vendors/:vendorId/ledger', requireAuth, requirePermission('procurement.write'), asyncHandler(vendorLedger.get));
   const production = express.Router(); production.post('/work-orders/:id/consume', requireAuth, requirePermission('inventory.write'), asyncHandler(workflow.consumeProductionMaterials)); production.post('/work-orders/:id/output', requireAuth, requirePermission('inventory.write'), asyncHandler(workflow.outputProductionGoods));
   const documents = express.Router();
   documents.post('/upload', requireAuth, requirePermission('documents.write'), documentUpload, asyncHandler(workflow.uploadDocument));

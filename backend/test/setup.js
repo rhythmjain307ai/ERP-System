@@ -18,6 +18,12 @@ async function setupIntegration() {
   await prisma.role_permission.createMany({ data: permissions.map(({ permission_id }) => ({ role_id: role.role_id, permission_id })) });
 
   const company = await prisma.company.create({ data: { company_name: `Test Company ${suffix}` } });
+  const financeFields = {};
+  for (const [key, account_type] of Object.entries(require('../lib/accounting').ACCOUNT_TYPES)) {
+    const account = await prisma.chart_of_account.create({ data: { company_id: company.company_id, account_code: `TEST-${key}`, account_name: key, account_type } });
+    financeFields[`${key}_account_id`] = account.account_id;
+  }
+  await prisma.company_finance_config.create({ data: { company_id: company.company_id, ...financeFields } });
   const factory = await prisma.factory.create({ data: { company_id: company.company_id, factory_code: `F-${suffix}`, factory_name: `Test Factory ${suffix}` } });
   const warehouse = await prisma.warehouse.create({ data: { factory_id: factory.factory_id, warehouse_code: `W-${suffix}`, warehouse_name: `Test Warehouse ${suffix}` } });
   const customer = await prisma.customer.create({ data: { company_id: company.company_id, customer_code: `C-${suffix}`, customer_name: `Test Customer ${suffix}` } });
@@ -46,6 +52,8 @@ async function setupIntegration() {
 
   return {
     auth: `Bearer ${createAuthToken(user.user_id)}`,
+    companyId: company.company_id.toString(),
+    financeFields,
     customerId: customer.customer_id.toString(),
     otherCustomerId: otherCustomer.customer_id.toString(),
     vendorId: vendor.vendor_id.toString(),
@@ -59,6 +67,11 @@ async function setupIntegration() {
     async cleanup() {
       const transactionIds = created.approvalTransactionIds.map((value) => BigInt(value));
       await prisma.$transaction([
+        prisma.journal_line.deleteMany({ where: { journal_entry: { accounting_entry: { company_id: company.company_id } } } }),
+        prisma.journal_entry.deleteMany({ where: { accounting_entry: { company_id: company.company_id } } }),
+        prisma.accounting_entry.deleteMany({ where: { company_id: company.company_id } }),
+        prisma.company_finance_config.deleteMany({ where: { company_id: company.company_id } }),
+        prisma.chart_of_account.deleteMany({ where: { company_id: company.company_id } }),
         prisma.approval_action.deleteMany({ where: { transaction_type: 'TEST', transaction_id: { in: transactionIds } } }),
         prisma.stock_movement.deleteMany({ where: { reference_type: 'WORK_ORDER', reference_id: { in: created.workOrderIds } } }),
         prisma.production_output.deleteMany({ where: { work_order_id: { in: created.workOrderIds } } }),
@@ -71,6 +84,9 @@ async function setupIntegration() {
         prisma.inventory_lot.deleteMany({ where: { inventory_item_id: { in: created.productionItemIds } } }),
         prisma.approval_request.deleteMany({ where: { approval_workflow_id: workflow.approval_workflow_id } }),
         prisma.delivery.deleteMany({ where: { delivery_id: { in: created.deliveryIds } } }),
+        prisma.payment_allocation.deleteMany({ where: { payment: { vendor_id: { in: [vendor.vendor_id, otherVendor.vendor_id] } } } }),
+        prisma.payment.deleteMany({ where: { vendor_id: { in: [vendor.vendor_id, otherVendor.vendor_id] } } }),
+        prisma.accounts_payable.deleteMany({ where: { vendor_id: { in: [vendor.vendor_id, otherVendor.vendor_id] } } }),
         prisma.vendor_invoice.deleteMany({ where: { vendor_id: { in: [vendor.vendor_id, otherVendor.vendor_id] } } }),
         prisma.sales_invoice.deleteMany({ where: { sales_invoice_id: { in: created.invoiceIds } } }),
         prisma.customer_order.deleteMany({ where: { customer_order_id: { in: created.orderIds } } }),
@@ -81,6 +97,7 @@ async function setupIntegration() {
         prisma.purchase_order.deleteMany({ where: { purchase_order_id: { in: created.purchaseOrderIds } } }),
         prisma.purchase_requisition.deleteMany({ where: { purchase_requisition_id: { in: created.requisitionIds } } }),
         prisma.approval_workflow.delete({ where: { approval_workflow_id: workflow.approval_workflow_id } }),
+        prisma.audit_log.deleteMany({ where: { user_id: user.user_id } }),
         prisma.users.delete({ where: { user_id: user.user_id } }),
         prisma.role.delete({ where: { role_id: role.role_id } }),
         prisma.inventory_item.delete({ where: { inventory_item_id: inventoryItem.inventory_item_id } }),

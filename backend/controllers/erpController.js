@@ -1,4 +1,6 @@
 const prisma = require('../lib/prisma');
+const { audit } = require('../lib/finance');
+const { postInvoice } = require('../lib/accounting');
 const fs = require('fs/promises');
 const path = require('path');
 const { processDocument } = require('../lib/ocr/documentProcessor');
@@ -748,6 +750,7 @@ async function createVendorInvoice(req, res) {
     }
 
     const invoice = await tx.vendor_invoice.create({ data: {
+      created_by: req.user.user_id, created_at: new Date(),
       vendor_id: vendorId,
       purchase_order_id: purchaseOrderId,
       invoice_number: req.body.invoice_number,
@@ -793,6 +796,7 @@ async function createVendorInvoice(req, res) {
       }
     }
     const createdInvoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoice.vendor_invoice_id }, include: { vendor_invoice_item: { include: { vendor_invoice_grn_match: true } } } });
+    await audit(tx, req.user.user_id, 'INVOICE_CREATED', 'vendor_invoice', invoice.vendor_invoice_id, undefined, createdInvoice);
     return { ...createdInvoice, vendor_invoice_item: createdInvoice.vendor_invoice_item.map((item) => ({ ...item, match_status: Number(item.vendor_invoice_grn_match.reduce((total, match) => total + Number(match.matched_quantity), 0)) === 0 ? 'UNMATCHED' : Number(item.vendor_invoice_grn_match.reduce((total, match) => total + Number(match.matched_quantity), 0)) >= Number(item.quantity) ? 'FULLY_MATCHED' : 'PARTIALLY_MATCHED' })) };
   });
   res.status(201).json({ success: true, data: result });
@@ -801,10 +805,31 @@ async function createVendorInvoice(req, res) {
 async function transitionVendorInvoice(req, res, status) {
   const invoiceId = id(req.params.id, 'id');
   const result = await prisma.$transaction(async (tx) => {
-    const invoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId }, select: { status: true } });
+    // Both transitions take the same lock before checking status or creating AP.
+    await tx.$queryRaw`SELECT "vendor_invoice_id" FROM "public"."vendor_invoice" WHERE "vendor_invoice_id" = ${invoiceId} FOR UPDATE`;
+    const invoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } });
     if (!invoice) throw new NotFoundError('vendor invoice');
+    const payable = await tx.accounts_payable.findUnique({ where: { vendor_invoice_id: invoiceId }, select: { accounts_payable_id: true } });
+    if (payable) throw new ApiError(409, 'Vendor invoice cannot be booked or cancelled once accounts payable exists');
     if (invoice.status !== 'DRAFT') throw new ApiError(409, `Vendor invoice cannot transition from ${invoice.status} to ${status}`);
-    return tx.vendor_invoice.update({ where: { vendor_invoice_id: invoiceId }, data: { status } });
+    if (status === 'BOOKED' && invoice.total_amount.isNegative()) throw new ValidationError('Invoice total cannot be negative when booking');
+    const updatedInvoice = await tx.vendor_invoice.update({ where: { vendor_invoice_id: invoiceId }, data: { status, ...(status === 'BOOKED' ? { booked_by: req.user.user_id, booked_at: new Date() } : { cancelled_by: req.user.user_id, cancelled_at: new Date() }) } });
+    if (status === 'BOOKED') {
+      const createdPayable = await tx.accounts_payable.create({ data: {
+        created_by: req.user.user_id, created_at: new Date(),
+        vendor_id: invoice.vendor_id,
+        vendor_invoice_id: invoiceId,
+        due_date: invoice.due_date,
+        invoice_amount: invoice.total_amount,
+        paid_amount: 0,
+        outstanding_amount: invoice.total_amount,
+        status: 'OPEN'
+      } });
+      await audit(tx, req.user.user_id, 'AP_CREATED', 'accounts_payable', createdPayable.accounts_payable_id, undefined, createdPayable);
+      await postInvoice(tx, invoice, req.user.user_id);
+    }
+    await audit(tx, req.user.user_id, status === 'BOOKED' ? 'INVOICE_BOOKED' : 'INVOICE_CANCELLED', 'vendor_invoice', invoiceId, invoice, updatedInvoice);
+    return updatedInvoice;
   });
   res.json({ success: true, status: result.status });
 }
