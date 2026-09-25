@@ -330,14 +330,44 @@ async function getSalesInvoice(req, res) {
 
 async function createDelivery(req, res) {
   required(req.body, ['delivery_number', 'customer_id']);
-  return createWithItems(req, res, 'delivery', 'delivery_item', 'delivery_id', 'delivery_item', {
-    delivery_number: req.body.delivery_number, customer_id: id(req.body.customer_id, 'customer_id'), customer_order_id: req.body.customer_order_id === undefined ? undefined : id(req.body.customer_order_id, 'customer_order_id'), sales_invoice_id: req.body.sales_invoice_id === undefined ? undefined : id(req.body.sales_invoice_id, 'sales_invoice_id'), warehouse_id: req.body.warehouse_id === undefined ? undefined : id(req.body.warehouse_id, 'warehouse_id'), delivery_date: date(req.body.delivery_date), status: 'DRAFT', remarks: req.body.remarks
-  }, (parent, item) => ({ delivery_id: parent.delivery_id, customer_order_item_id: item.customer_order_item_id === undefined ? undefined : id(item.customer_order_item_id, 'customer_order_item_id'), sales_invoice_item_id: item.sales_invoice_item_id === undefined ? undefined : id(item.sales_invoice_item_id, 'sales_invoice_item_id'), inventory_item_id: id(item.inventory_item_id, 'inventory_item_id'), lot_id: item.lot_id === undefined ? undefined : id(item.lot_id, 'lot_id'), description: item.description, uom: item.uom, ordered_quantity: item.ordered_quantity === undefined ? undefined : number(item.ordered_quantity, 'ordered_quantity'), delivered_quantity: number(item.delivered_quantity ?? item.quantity, 'delivered_quantity'), weight_kg: item.weight_kg === undefined ? undefined : number(item.weight_kg, 'weight_kg'), remarks: item.remarks }));
+  itemsRequired(req.body);
+  const customerId = id(req.body.customer_id, 'customer_id');
+  const warehouseId = req.body.warehouse_id === undefined ? undefined : id(req.body.warehouse_id, 'warehouse_id');
+  const result = await prisma.$transaction(async tx => {
+    const customer = await tx.customer.findUnique({ where: { customer_id: customerId } });
+    if (!customer?.is_active) throw new ValidationError('Delivery customer does not exist or is inactive');
+    assertCompanyAccess(req, customer.company_id);
+    if (warehouseId) {
+      const warehouse = await tx.warehouse.findUnique({ where: { warehouse_id: warehouseId }, include: { factory: true } });
+      if (!warehouse?.is_active || warehouse.factory.company_id !== customer.company_id) throw new ValidationError('Delivery warehouse must be active and belong to the customer company');
+    }
+    const prepared = [];
+    for (let index = 0; index < req.body.items.length; index++) {
+      const item = req.body.items[index];
+      const inventoryItemId = id(item.inventory_item_id, `items[${index}].inventory_item_id`);
+      const inventoryItem = await tx.inventory_item.findUnique({ where: { inventory_item_id: inventoryItemId } });
+      if (!inventoryItem?.is_active) throw new ValidationError(`Delivery item ${index} inventory item does not exist or is inactive`);
+      if (item.uom !== inventoryItem.base_uom) throw new ValidationError(`Delivery item ${index} UOM must match inventory item base UOM ${inventoryItem.base_uom}`);
+      const quantity = decimal(item.delivered_quantity ?? item.quantity, `items[${index}].delivered_quantity`);
+      if (quantity.lte(0) || quantity.decimalPlaces() > 3) throw new ValidationError(`items[${index}].delivered_quantity must be greater than zero with at most three decimals`);
+      const weight = item.weight_kg === undefined ? undefined : decimal(item.weight_kg, `items[${index}].weight_kg`);
+      if (weight && (weight.lt(0) || weight.decimalPlaces() > 3)) throw new ValidationError(`items[${index}].weight_kg must be nonnegative with at most three decimals`);
+      prepared.push({ customer_order_item_id: item.customer_order_item_id === undefined ? undefined : id(item.customer_order_item_id, 'customer_order_item_id'), sales_invoice_item_id: item.sales_invoice_item_id === undefined ? undefined : id(item.sales_invoice_item_id, 'sales_invoice_item_id'), inventory_item_id: inventoryItemId,
+        lot_id: item.lot_id === undefined ? undefined : id(item.lot_id, 'lot_id'), description: item.description, uom: item.uom,
+        ordered_quantity: item.ordered_quantity === undefined ? 0 : decimal(item.ordered_quantity, `items[${index}].ordered_quantity`).toString(), delivered_quantity: quantity.toString(), weight_kg: weight?.toString(), remarks: item.remarks });
+    }
+    const delivery = await tx.delivery.create({ data: { delivery_number: req.body.delivery_number, customer_id: customerId,
+      customer_order_id: req.body.customer_order_id === undefined ? undefined : id(req.body.customer_order_id, 'customer_order_id'), sales_invoice_id: req.body.sales_invoice_id === undefined ? undefined : id(req.body.sales_invoice_id, 'sales_invoice_id'),
+      warehouse_id: warehouseId, delivery_date: date(req.body.delivery_date), status: 'DRAFT', remarks: req.body.remarks, delivery_item: { create: prepared } }, include: { delivery_item: true } });
+    await audit(tx, req.user.user_id, 'DELIVERY_CREATED', 'delivery', delivery.delivery_id, undefined, delivery);
+    return delivery;
+  });
+  res.status(201).json({ success: true, data: result });
 }
 
 async function listDeliveries(req, res) {
   const { page, pageSize } = pageQuery(req);
-  const where = {};
+  const where = { customer: { company_id: req.companyId } };
   if (req.query.status) where.status = req.query.status;
   if (req.query.search) where.OR = [{ delivery_number: { contains: req.query.search, mode: 'insensitive' } }, { customer: { customer_name: { contains: req.query.search, mode: 'insensitive' } } }];
   const include = { customer: true, warehouse: true, customer_order: { select: { customer_order_id: true, order_number: true } }, sales_invoice: { select: { sales_invoice_id: true, invoice_number: true } }, delivery_item: { include: { inventory_item: true, inventory_lot: true } } };
@@ -349,7 +379,7 @@ async function listDeliveries(req, res) {
 }
 
 async function getDelivery(req, res) {
-  const data = await prisma.delivery.findUnique({ where: { delivery_id: id(req.params.id, 'id') }, include: { customer: true, warehouse: true, customer_order: { include: { customer_order_item: { include: { inventory_item: true } } } }, sales_invoice: { include: { sales_invoice_item: { include: { inventory_item: true } } } }, delivery_item: { include: { inventory_item: true, inventory_lot: true, customer_order_item: true, sales_invoice_item: true } } } });
+  const data = await prisma.delivery.findFirst({ where: { delivery_id: id(req.params.id, 'id'), customer: { company_id: req.companyId } }, include: { customer: true, warehouse: true, customer_order: { include: { customer_order_item: { include: { inventory_item: true } } } }, sales_invoice: { include: { sales_invoice_item: { include: { inventory_item: true } } } }, delivery_item: { include: { inventory_item: true, inventory_lot: true, customer_order_item: true, sales_invoice_item: true } } } });
   if (!data) throw new NotFoundError('delivery');
   res.json({ success: true, data });
 }
@@ -365,25 +395,35 @@ async function dispatchDelivery(req, res) {
       include: {
         delivery_item: { include: { inventory_item: true } },
         customer_order: { include: { customer_order_item: true } },
-        sales_invoice: { include: { sales_invoice_item: true } }
+        sales_invoice: { include: { sales_invoice_item: true } },
+        customer: true,
+        warehouse: { include: { factory: true } }
       }
     });
     if (!delivery) throw new NotFoundError('delivery');
+    assertCompanyAccess(req, delivery.customer.company_id);
     if (!['DRAFT', 'READY'].includes(delivery.status)) throw new ApiError(409, `Delivery is already ${delivery.status}`);
     if (!delivery.warehouse_id) throw new ValidationError('Delivery warehouse_id is required before dispatch');
+    if (!delivery.warehouse?.is_active || delivery.warehouse.factory.company_id !== delivery.customer.company_id) throw new ValidationError('Delivery warehouse must be active and belong to the customer company');
+    if (!delivery.delivery_item.length) throw new ValidationError('Delivery must contain at least one line');
     if (delivery.customer_order_id && !delivery.customer_order) throw new ValidationError('Delivery customer order could not be found');
     if (delivery.sales_invoice_id && !delivery.sales_invoice) throw new ValidationError('Delivery sales invoice could not be found');
     if (delivery.customer_order && delivery.customer_id !== delivery.customer_order.customer_id) throw new ValidationError('Delivery customer must match the customer-order customer');
     if (delivery.sales_invoice && delivery.customer_id !== delivery.sales_invoice.customer_id) throw new ValidationError('Delivery customer must match the sales-invoice customer');
     if (delivery.customer_order && delivery.sales_invoice && delivery.customer_order.customer_id !== delivery.sales_invoice.customer_id) throw new ValidationError('Customer order and sales invoice must belong to the same customer');
+    if (delivery.customer_order) {
+      await tx.$queryRaw`SELECT "customer_order_id" FROM "public"."customer_order" WHERE "customer_order_id" = ${delivery.customer_order_id} FOR UPDATE`;
+      const currentOrder = await tx.customer_order.findUnique({ where: { customer_order_id: delivery.customer_order_id } });
+      if (!['OPEN', 'PARTIALLY_FULFILLED'].includes(currentOrder.status)) throw new ApiError(409, `Delivery cannot be dispatched against sales order status ${currentOrder.status}`);
+    }
 
     const customerOrderItems = new Map((delivery.customer_order?.customer_order_item || []).map((item) => [item.customer_order_item_id.toString(), item]));
     const salesInvoiceItems = new Map((delivery.sales_invoice?.sales_invoice_item || []).map((item) => [item.sales_invoice_item_id.toString(), item]));
     const stockLines = [];
     const linkedLines = new Map();
     for (const line of delivery.delivery_item) {
-      const deliveredQuantity = Number(line.delivered_quantity);
-      if (!Number.isFinite(deliveredQuantity) || deliveredQuantity <= 0) throw new ValidationError(`Delivery item ${line.delivery_item_id} delivered_quantity must be greater than zero`);
+      const deliveredQuantity = new Money(line.delivered_quantity.toString());
+      if (!deliveredQuantity.isFinite() || deliveredQuantity.lte(0) || deliveredQuantity.decimalPlaces() > 3) throw new ValidationError(`Delivery item ${line.delivery_item_id} delivered_quantity must be greater than zero`);
 
       if (line.customer_order_item_id) {
         const orderItem = customerOrderItems.get(line.customer_order_item_id.toString());
@@ -393,11 +433,13 @@ async function dispatchDelivery(req, res) {
         const invoiceItem = salesInvoiceItems.get(line.sales_invoice_item_id.toString());
         if (!invoiceItem || invoiceItem.inventory_item_id !== line.inventory_item_id || invoiceItem.uom !== line.uom) throw new ValidationError(`Delivery item ${line.delivery_item_id} does not match its sales-invoice item`);
       }
-      if (line.customer_order_item_id) linkedLines.set(`order:${line.customer_order_item_id}`, { type: 'customer order', id: line.customer_order_item_id, limit: customerOrderItems.get(line.customer_order_item_id.toString()).ordered_quantity, quantityField: 'ordered_quantity', requested: (linkedLines.get(`order:${line.customer_order_item_id}`)?.requested || 0) + deliveredQuantity });
-      if (line.sales_invoice_item_id) linkedLines.set(`invoice:${line.sales_invoice_item_id}`, { type: 'sales invoice', id: line.sales_invoice_item_id, limit: salesInvoiceItems.get(line.sales_invoice_item_id.toString()).quantity, quantityField: 'quantity', requested: (linkedLines.get(`invoice:${line.sales_invoice_item_id}`)?.requested || 0) + deliveredQuantity });
+      if (line.customer_order_item_id) linkedLines.set(`order:${line.customer_order_item_id}`, { type: 'customer order', id: line.customer_order_item_id, limit: customerOrderItems.get(line.customer_order_item_id.toString()).ordered_quantity, quantityField: 'ordered_quantity', requested: (linkedLines.get(`order:${line.customer_order_item_id}`)?.requested || new Money(0)).plus(deliveredQuantity) });
+      if (line.sales_invoice_item_id) linkedLines.set(`invoice:${line.sales_invoice_item_id}`, { type: 'sales invoice', id: line.sales_invoice_item_id, limit: salesInvoiceItems.get(line.sales_invoice_item_id.toString()).quantity, quantityField: 'quantity', requested: (linkedLines.get(`invoice:${line.sales_invoice_item_id}`)?.requested || new Money(0)).plus(deliveredQuantity) });
+      if (line.inventory_item.is_lot_tracked && !line.lot_id) throw new ValidationError(`Delivery item ${line.delivery_item_id} requires a lot`);
+      if (!line.inventory_item.is_lot_tracked && line.lot_id) throw new ValidationError(`Delivery item ${line.delivery_item_id} lot does not match item tracking requirements`);
       if (line.lot_id) {
         const lot = await tx.inventory_lot.findUnique({ where: { lot_id: line.lot_id } });
-        if (!lot || lot.inventory_item_id !== line.inventory_item_id || lot.warehouse_id !== delivery.warehouse_id) throw new ValidationError(`Delivery item ${line.delivery_item_id} lot does not match the item and warehouse`);
+        if (!lot || lot.status !== 'OPEN' || lot.inventory_item_id !== line.inventory_item_id || lot.warehouse_id !== delivery.warehouse_id) throw new ValidationError(`Delivery item ${line.delivery_item_id} lot does not match the item and warehouse or is not OPEN`);
       }
       stockLines.push({ line, deliveredQuantity, key: `${line.inventory_item_id}:${delivery.warehouse_id}:${line.lot_id || 'null'}` });
     }
@@ -413,11 +455,11 @@ async function dispatchDelivery(req, res) {
         },
         _sum: { delivered_quantity: true }
       });
-      const previousQuantity = Number(previous._sum.delivered_quantity || 0);
-      const totalQuantity = previousQuantity + linkedLine.requested;
-      const limit = Number(linkedLine.limit);
-      if (totalQuantity > limit) {
-        const excess = totalQuantity - limit;
+      const previousQuantity = new Money(previous._sum.delivered_quantity?.toString() || 0);
+      const totalQuantity = previousQuantity.plus(linkedLine.requested);
+      const limit = new Money(linkedLine.limit.toString());
+      if (totalQuantity.gt(limit)) {
+        const excess = totalQuantity.minus(limit);
         throw new ValidationError(`Delivery ${linkedLine.type} line ${linkedLine.id} exceeds ${linkedLine.quantityField} ${limit}: previously dispatched ${previousQuantity}, current requested ${linkedLine.requested}, excess ${excess}`);
       }
     }
@@ -430,21 +472,33 @@ async function dispatchDelivery(req, res) {
         stockBalances.set(key, await lockStockBalance(tx, line.inventory_item_id, delivery.warehouse_id, line.lot_id));
       }
       const stock = stockBalances.get(key);
-      const available = stock ? Number(stock.quantity) - Number(stock.reserved_quantity) : 0;
-      const alreadyRequested = requestedByStock.get(key) || 0;
-      const requested = alreadyRequested + deliveredQuantity;
-      if (!stock) throw new ValidationError(`Insufficient stock for item ${line.inventory_item_id} in warehouse ${delivery.warehouse_id}: requested ${requested}, available ${available}, shortage ${requested - available}`);
-      if (requested > available) throw new ValidationError(`Insufficient stock for item ${line.inventory_item_id} in warehouse ${delivery.warehouse_id}: requested ${requested}, available ${available}, shortage ${requested - available}`);
+      const available = stock ? new Money(stock.quantity.toString()).minus(stock.reserved_quantity.toString()) : new Money(0);
+      const requested = (requestedByStock.get(key) || new Money(0)).plus(deliveredQuantity);
+      if (!stock) throw new ValidationError(`Insufficient stock for item ${line.inventory_item_id} in warehouse ${delivery.warehouse_id}: requested ${requested}, available ${available}, shortage ${requested.minus(available)}`);
+      if (requested.gt(available)) throw new ValidationError(`Insufficient stock for item ${line.inventory_item_id} in warehouse ${delivery.warehouse_id}: requested ${requested}, available ${available}, shortage ${requested.minus(available)}`);
       requestedByStock.set(key, requested);
     }
 
     for (const stockLine of stockLines) {
       const stock = stockBalances.get(stockLine.key);
-      await tx.inventory_stock.update({ where: { inventory_stock_id: stock.inventory_stock_id }, data: { quantity: { decrement: stockLine.deliveredQuantity }, last_updated_at: new Date() } });
-      await tx.stock_movement.create({ data: { inventory_item_id: stockLine.line.inventory_item_id, warehouse_id: delivery.warehouse_id, lot_id: stockLine.line.lot_id, movement_type: 'SALE_ISSUE', reference_type: 'DELIVERY', reference_id: delivery.delivery_id, quantity: stockLine.deliveredQuantity, movement_date: new Date(), remarks: `Delivery ${delivery.delivery_number}` } });
+      await tx.inventory_stock.update({ where: { inventory_stock_id: stock.inventory_stock_id }, data: { quantity: { decrement: stockLine.deliveredQuantity.toString() }, last_updated_at: new Date() } });
+      await tx.stock_movement.create({ data: { inventory_item_id: stockLine.line.inventory_item_id, warehouse_id: delivery.warehouse_id, lot_id: stockLine.line.lot_id, movement_type: 'SALE_ISSUE', reference_type: 'DELIVERY', reference_id: delivery.delivery_id, quantity: stockLine.deliveredQuantity.toString(), movement_date: new Date(), remarks: `Delivery ${delivery.delivery_number}` } });
     }
 
-    return tx.delivery.update({ where: { delivery_id: delivery.delivery_id }, data: { status: 'DISPATCHED' }, include: { delivery_item: true } });
+    const dispatched = await tx.delivery.update({ where: { delivery_id: delivery.delivery_id }, data: { status: 'DISPATCHED' }, include: { delivery_item: true } });
+    if (delivery.customer_order_id) {
+      const orderItems = await tx.customer_order_item.findMany({ where: { customer_order_id: delivery.customer_order_id } });
+      let anyDelivered = false, fulfilled = orderItems.length > 0;
+      for (const item of orderItems) {
+        const total = await tx.delivery_item.aggregate({ where: { customer_order_item_id: item.customer_order_item_id, delivery: { status: { in: ['DISPATCHED', 'DELIVERED'] } } }, _sum: { delivered_quantity: true } });
+        const delivered = new Money(total._sum.delivered_quantity?.toString() || 0);
+        anyDelivered ||= delivered.gt(0);
+        fulfilled &&= delivered.gte(item.ordered_quantity.toString());
+      }
+      await tx.customer_order.update({ where: { customer_order_id: delivery.customer_order_id }, data: { status: fulfilled ? 'FULFILLED' : anyDelivered ? 'PARTIALLY_FULFILLED' : 'OPEN' } });
+    }
+    await audit(tx, req.user.user_id, 'DELIVERY_DISPATCHED', 'delivery', delivery.delivery_id, delivery, dispatched);
+    return dispatched;
   });
   res.json({ success: true, data: result });
 }

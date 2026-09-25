@@ -223,6 +223,12 @@ model chart_of_account {
   finance_input_cgst company_finance_config[] @relation("Finance_input_cgst")
   finance_expense company_finance_config[] @relation("Finance_expense")
   finance_inventory company_finance_config[] @relation("Finance_inventory")
+  finance_receivable company_finance_config[] @relation("Finance_receivable")
+  finance_sales_revenue company_finance_config[] @relation("Finance_sales_revenue")
+  finance_output_cgst company_finance_config[] @relation("Finance_output_cgst")
+  finance_output_sgst company_finance_config[] @relation("Finance_output_sgst")
+  finance_output_igst company_finance_config[] @relation("Finance_output_igst")
+  finance_output_cess company_finance_config[] @relation("Finance_output_cess")
   account_id             BigInt             @id @default(autoincrement())
   company_id             BigInt
   account_code           String
@@ -1495,4 +1501,16 @@ model company_finance_config {
   cash_account chart_of_account @relation("Finance_cash", fields: [cash_account_id], references: [account_id], onDelete: Restrict)
   rounding_account_id BigInt
   rounding_account chart_of_account @relation("Finance_rounding", fields: [rounding_account_id], references: [account_id], onDelete: Restrict)
+  receivable_account_id BigInt?
+  receivable_account chart_of_account? @relation("Finance_receivable", fields: [receivable_account_id], references: [account_id], onDelete: Restrict)
+  sales_revenue_account_id BigInt?
+  sales_revenue_account chart_of_account? @relation("Finance_sales_revenue", fields: [sales_revenue_account_id], references: [account_id], onDelete: Restrict)
+  output_cgst_account_id BigInt?
+  output_cgst_account chart_of_account? @relation("Finance_output_cgst", fields: [output_cgst_account_id], references: [account_id], onDelete: Restrict)
+  output_sgst_account_id BigInt?
+  output_sgst_account chart_of_account? @relation("Finance_output_sgst", fields: [output_sgst_account_id], references: [account_id], onDelete: Restrict)
+  output_igst_account_id BigInt?
+  output_igst_account chart_of_account? @relation("Finance_output_igst", fields: [output_igst_account_id], references: [account_id], onDelete: Restrict)
+  output_cess_account_id BigInt?
+  output_cess_account chart_of_account? @relation("Finance_output_cess", fields: [output_cess_account_id], references: [account_id], onDelete: Restrict)
 }

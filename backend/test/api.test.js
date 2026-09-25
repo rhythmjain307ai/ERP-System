@@ -149,6 +149,10 @@ async function resetStock(quantity, inventoryItemId = context.inventoryItemId, l
 }
 
 async function createDeliveryFixture(options = {}) {
+  if (options.customerOrderId) {
+    const order = await prisma.customer_order.findUnique({ where: { customer_order_id: BigInt(options.customerOrderId) } });
+    if (order.status === 'DRAFT') assert.equal((await request(app).post(`/api/sales/orders/${options.customerOrderId}/confirm`).set('Authorization', context.auth)).status, 200);
+  }
   const response = await request(app).post('/api/sales/deliveries').set('Authorization', context.auth).send({
     delivery_number: `DEL-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
     customer_id: options.customerId || context.customerId,
@@ -177,12 +181,13 @@ test('lists and retrieves sales workflow records with their related data', { ski
   });
   assert.equal(order.status, 201);
   context.created.orderIds.push(BigInt(order.body.data.customer_order_id));
+  assert.equal((await request(app).post(`/api/sales/orders/${order.body.data.customer_order_id}/confirm`).set('Authorization', context.auth).send({})).status, 200);
 
   const invoice = await request(app).post('/api/sales/invoices').set('Authorization', context.auth).send({
     invoice_number: `INV-READ-${suffix}`,
     customer_id: context.customerId,
     customer_order_id: order.body.data.customer_order_id,
-    items: [{ inventory_item_id: context.inventoryItemId, description: 'Read workflow item', uom: 'EA', quantity: 1 }]
+    items: [{ customer_order_item_id: order.body.data.customer_order_item[0].customer_order_item_id, inventory_item_id: context.inventoryItemId, description: 'Read workflow item', uom: 'EA', quantity: 1 }]
   });
   assert.equal(invoice.status, 201);
   context.created.invoiceIds.push(BigInt(invoice.body.data.sales_invoice_id));

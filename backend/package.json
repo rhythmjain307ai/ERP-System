@@ -9,7 +9,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev --name init",
     "seed": "node prisma/seed.js",
-    "test": "node --test --test-concurrency=1 --test-timeout=60000 test/api.test.js test/ocr.test.js test/upload.test.js test/pdf.test.js test/documents.test.js test/vendorInvoice.test.js test/accountsPayable.test.js test/payment.test.js test/allocation.test.js test/accounting.test.js test/reversal.test.js test/vendorLedger.test.js test/bankReconciliation.test.js test/financialAudit.test.js test/financialReports.test.js",
+    "test": "node --test --test-concurrency=1 --test-timeout=60000 test/api.test.js test/ocr.test.js test/upload.test.js test/pdf.test.js test/documents.test.js test/vendorInvoice.test.js test/accountsPayable.test.js test/payment.test.js test/allocation.test.js test/accounting.test.js test/reversal.test.js test/vendorLedger.test.js test/bankReconciliation.test.js test/financialAudit.test.js test/financialReports.test.js test/salesOrder.test.js test/salesOrderApproval.test.js test/deliveryHardening.test.js test/salesInvoice.test.js test/accountsReceivable.test.js test/customerPayment.test.js test/customerAllocation.test.js test/customerLedger.test.js test/salesAccounting.test.js test/salesReversal.test.js test/orderToCashE2E.test.js",
     "test:ocr": "node --test --test-concurrency=1 --test-timeout=60000 test/ocr.test.js test/upload.test.js test/pdf.test.js test/documents.test.js"
   },
   "dependencies": {

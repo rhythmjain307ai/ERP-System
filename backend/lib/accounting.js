@@ -3,9 +3,11 @@ const { Money } = require('./accountsPayable');
 const { ApiError, ValidationError } = require('./errors');
 const { audit } = require('./finance');
 
-const ACCOUNT_TYPES = { inventory: 'ASSET', expense: 'EXPENSE', input_cgst: 'ASSET', input_sgst: 'ASSET', input_igst: 'ASSET', input_cess: 'ASSET', payable: 'LIABILITY', cash: 'ASSET', rounding: 'EXPENSE' };
-async function validateConfig(tx, companyId, config) {
-  const required = Object.entries(ACCOUNT_TYPES).map(([key, type]) => ({ key, type, accountId: config[`${key}_account_id`] }));
+const PURCHASE_ACCOUNT_TYPES = { inventory: 'ASSET', expense: 'EXPENSE', input_cgst: 'ASSET', input_sgst: 'ASSET', input_igst: 'ASSET', input_cess: 'ASSET', payable: 'LIABILITY', cash: 'ASSET', rounding: 'EXPENSE' };
+const SALES_ACCOUNT_TYPES = { receivable: 'ASSET', sales_revenue: 'INCOME', output_cgst: 'LIABILITY', output_sgst: 'LIABILITY', output_igst: 'LIABILITY', output_cess: 'LIABILITY' };
+const ACCOUNT_TYPES = { ...PURCHASE_ACCOUNT_TYPES, ...SALES_ACCOUNT_TYPES };
+async function validateConfig(tx, companyId, config, types = ACCOUNT_TYPES) {
+  const required = Object.entries(types).map(([key, type]) => ({ key, type, accountId: config[`${key}_account_id`] }));
   const accountIds = [...new Set(required.map(({ accountId }) => accountId).filter((accountId) => accountId != null))];
   const accounts = await tx.chart_of_account.findMany({ where: { account_id: { in: accountIds } } });
   const accountsById = new Map(accounts.map((account) => [account.account_id.toString(), account]));
@@ -15,10 +17,10 @@ async function validateConfig(tx, companyId, config) {
   }
   return config;
 }
-async function getConfig(tx, companyId) {
+async function getConfig(tx, companyId, types = PURCHASE_ACCOUNT_TYPES) {
   const config = await tx.company_finance_config.findUnique({ where: { company_id: companyId } });
   if (!config) throw new ApiError(409, 'Configure company GL mappings before posting');
-  return validateConfig(tx, companyId, config);
+  return validateConfig(tx, companyId, config, types);
 }
 
 async function postJournal(tx, { companyId, sourceType, sourceId, date, userId, lines, description, reversalOf, journalReversalOf }) {
@@ -84,4 +86,42 @@ async function postAllocation(tx, payment, allocation, userId) {
     ] });
 }
 
-module.exports = { ACCOUNT_TYPES, validateConfig, getConfig, postJournal, postInvoice, postAllocation };
+async function postSalesInvoice(tx, invoice, userId) {
+  const customer = await tx.customer.findUnique({ where: { customer_id: invoice.customer_id } });
+  const types = { ...SALES_ACCOUNT_TYPES, rounding: PURCHASE_ACCOUNT_TYPES.rounding };
+  const c = await getConfig(tx, customer.company_id, types);
+  const items = await tx.sales_invoice_item.findMany({ where: { sales_invoice_id: invoice.sales_invoice_id } });
+  const sum = field => items.reduce((total, row) => total.plus(row[field].toString()), new Money(0));
+  for (const field of ['taxable_amount', 'cgst_amount', 'sgst_amount', 'igst_amount', 'cess_amount']) {
+    if (!sum(field).eq(invoice[field].toString())) throw new ValidationError(`Sales invoice ${field} header does not match its lines`);
+  }
+  const revenue = new Money(invoice.taxable_amount.toString()).plus(invoice.other_charges.toString());
+  const lines = [{ accountId: c.receivable_account_id, debit: invoice.total_amount }, { accountId: c.sales_revenue_account_id, credit: revenue }];
+  let credits = revenue;
+  for (const tax of ['cgst', 'sgst', 'igst', 'cess']) {
+    const value = new Money(invoice[`${tax}_amount`].toString());
+    credits = credits.plus(value); lines.push({ accountId: c[`output_${tax}_account_id`], credit: value });
+  }
+  const round = new Money(invoice.round_off.toString());
+  if (!credits.plus(round).eq(invoice.total_amount.toString())) throw new ValidationError('Sales invoice total does not balance with revenue, tax, charges, and rounding');
+  lines.push({ accountId: c.rounding_account_id, debit: round.lt(0) ? round.negated() : 0, credit: round.gt(0) ? round : 0 });
+  return postJournal(tx, { companyId: customer.company_id, sourceType: 'SALES_INVOICE', sourceId: invoice.sales_invoice_id, date: invoice.invoice_date, userId,
+    lines, description: `Sales invoice ${invoice.invoice_number}` });
+}
+
+async function postCustomerAllocation(tx, payment, allocation, userId) {
+  const customer = await tx.customer.findUnique({ where: { customer_id: payment.customer_id } });
+  const c = await getConfig(tx, customer.company_id, { receivable: SALES_ACCOUNT_TYPES.receivable, cash: PURCHASE_ACCOUNT_TYPES.cash });
+  let debitAccount = c.cash_account_id;
+  if (payment.mode !== 'CASH') {
+    const bank = await tx.bank_account.findUnique({ where: { bank_account_id: payment.bank_account_id || 0n }, include: { gl_account: true } });
+    if (!bank?.is_active || bank.company_id !== customer.company_id || !bank.gl_account?.is_active || bank.gl_account.company_id !== customer.company_id || bank.gl_account.account_type !== 'ASSET') throw new ValidationError('Active bank GL mapping is required');
+    debitAccount = bank.gl_account_id;
+  }
+  return postJournal(tx, { companyId: customer.company_id, sourceType: 'CUSTOMER_PAYMENT_ALLOCATION', sourceId: allocation.payment_allocation_id, date: allocation.allocated_at, userId,
+    description: `Customer payment ${payment.payment_id} allocation`, lines: [
+      { accountId: debitAccount, debit: allocation.allocated_amount }, { accountId: c.receivable_account_id, credit: allocation.allocated_amount }
+    ] });
+}
+
+module.exports = { ACCOUNT_TYPES, PURCHASE_ACCOUNT_TYPES, SALES_ACCOUNT_TYPES, validateConfig, getConfig, postJournal, postInvoice, postAllocation, postSalesInvoice, postCustomerAllocation };

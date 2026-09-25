@@ -3,6 +3,7 @@ const { Money, recalculatePayable, utcDate } = require('../lib/accountsPayable')
 const { financeId, financeDate, assertCompanyAccess, audit, financeJson } = require('../lib/finance');
 const { postJournal } = require('../lib/accounting');
 const { ApiError, ValidationError, NotFoundError } = require('../lib/errors');
+const { recalculateReceivable } = require('../lib/accountsReceivable');
 
 function parameters(req) {
   if (typeof req.body.reason !== 'string' || !req.body.reason.trim() || req.body.reason.length > 1000) throw new ValidationError('A reversal reason of 1 to 1000 characters is required');
@@ -105,4 +106,69 @@ async function journal(req, res) {
   });
   res.json({ success: true, data: financeJson(data) });
 }
-module.exports = { invoice, payment, journal };
+
+async function salesInvoice(req, res) {
+  const id = financeId(req.params.id, 'sales_invoice_id'), p = parameters(req);
+  const data = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT "sales_invoice_id" FROM "public"."sales_invoice" WHERE "sales_invoice_id" = ${id} FOR UPDATE`;
+    const invoice = await tx.sales_invoice.findUnique({ where: { sales_invoice_id: id }, include: { customer: { select: { company_id: true } } } });
+    if (!invoice) throw new NotFoundError('sales invoice');
+    assertCompanyAccess(req, invoice.customer.company_id);
+    if (invoice.status !== 'ISSUED') throw new ApiError(409, 'Only an issued invoice without active receipts can be reversed');
+    const ar = await tx.accounts_receivable.findUnique({ where: { sales_invoice_id: id } });
+    if (!ar) throw new ApiError(409, 'Legacy sales invoice has no AR; reconciliation is required');
+    await tx.$queryRaw`SELECT "accounts_receivable_id" FROM "public"."accounts_receivable" WHERE "accounts_receivable_id" = ${ar.accounts_receivable_id} FOR UPDATE`;
+    const active = await tx.payment_allocation.count({ where: { accounts_receivable_id: ar.accounts_receivable_id, reversed_at: null } });
+    if (active || !new Money(ar.received_amount.toString()).isZero()) throw new ApiError(409, 'Reverse active customer payments before reversing the invoice');
+    const entry = await tx.accounting_entry.findFirst({ where: { source_type: 'SALES_INVOICE', source_id: id } });
+    if (!entry) throw new ApiError(409, 'Legacy sales invoice has no journal; reconciliation is required');
+    const reversal = await reverseEntry(tx, entry.accounting_entry_id, p);
+    const updated = await tx.sales_invoice.update({ where: { sales_invoice_id: id }, data: { status: 'CANCELLED' } });
+    await tx.accounts_receivable.update({ where: { accounts_receivable_id: ar.accounts_receivable_id }, data: { status: 'CANCELLED', outstanding_amount: 0 } });
+    await audit(tx, p.userId, 'SALES_INVOICE_REVERSED', 'sales_invoice', id, invoice, { ...updated, reason: p.reason, reversal_date: p.date });
+    return { invoice: updated, reversal };
+  });
+  res.json({ success: true, data: financeJson(data) });
+}
+
+async function customerPayment(req, res) {
+  const id = financeId(req.params.id, 'payment_id'), p = parameters(req);
+  const data = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT "payment_id" FROM "public"."payment" WHERE "payment_id" = ${id} FOR UPDATE`;
+    const paymentRow = await tx.payment.findUnique({ where: { payment_id: id }, include: { customer: { select: { company_id: true } } } });
+    if (!paymentRow) throw new NotFoundError('payment');
+    if (paymentRow.status !== 'CREATED' || paymentRow.payment_type !== 'CUSTOMER_RECEIPT' || !paymentRow.customer || paymentRow.vendor_id !== null) throw new ApiError(409, 'Customer payment cannot be reversed');
+    assertCompanyAccess(req, paymentRow.customer.company_id);
+    if (p.date < paymentRow.payment_date) throw new ValidationError('Reversal date cannot precede payment date');
+    if (await tx.bank_transaction.count({ where: { payment_id: id } })) throw new ApiError(409, 'Unmatch the bank transaction before reversing the payment');
+    const allocations = await tx.payment_allocation.findMany({ where: { payment_id: id, reversed_at: null }, orderBy: { accounts_receivable_id: 'asc' } });
+    const arIds = [...new Set(allocations.map(row => row.accounts_receivable_id?.toString()))];
+    if (arIds.includes(undefined)) throw new ApiError(409, 'Customer payment has an invalid allocation target');
+    for (const text of arIds) {
+      const arId = BigInt(text);
+      await tx.$queryRaw`SELECT "accounts_receivable_id" FROM "public"."accounts_receivable" WHERE "accounts_receivable_id" = ${arId} FOR UPDATE`;
+      const ar = await tx.accounts_receivable.findUnique({ where: { accounts_receivable_id: arId } });
+      const sum = await tx.payment_allocation.aggregate({ where: { accounts_receivable_id: arId, reversed_at: null }, _sum: { allocated_amount: true } });
+      if (ar.status === 'CANCELLED' || !new Money(ar.received_amount.toString()).eq(sum._sum.allocated_amount?.toString() || '0')) throw new ApiError(409, 'AR balances require reconciliation before reversal');
+    }
+    for (const allocation of allocations) {
+      const entry = await tx.accounting_entry.findFirst({ where: { source_type: 'CUSTOMER_PAYMENT_ALLOCATION', source_id: allocation.payment_allocation_id } });
+      if (!entry) throw new ApiError(409, 'Allocation has no journal; reconciliation is required');
+      await reverseEntry(tx, entry.accounting_entry_id, p);
+      await tx.payment_allocation.update({ where: { payment_allocation_id: allocation.payment_allocation_id }, data: { reversed_at: new Date(), reversed_by: p.userId, reversal_reason: p.reason } });
+      await audit(tx, p.userId, 'CUSTOMER_ALLOCATION_REVERSED', 'payment_allocation', allocation.payment_allocation_id, allocation, { reason: p.reason, reversal_date: p.date });
+    }
+    for (const text of arIds) {
+      const arId = BigInt(text), remaining = await tx.payment_allocation.aggregate({ where: { accounts_receivable_id: arId, reversed_at: null }, _sum: { allocated_amount: true } });
+      const ar = await tx.accounts_receivable.update({ where: { accounts_receivable_id: arId }, data: { received_amount: remaining._sum.allocated_amount || 0, status: 'OPEN' } });
+      const recalculated = await recalculateReceivable(tx, arId);
+      if (ar.sales_invoice_id) await tx.sales_invoice.update({ where: { sales_invoice_id: ar.sales_invoice_id }, data: { status: recalculated.status === 'PAID' ? 'PAID' : recalculated.received_amount.gt(0) ? 'PARTIALLY_PAID' : 'ISSUED' } });
+    }
+    const updated = await tx.payment.update({ where: { payment_id: id }, data: { status: 'REVERSED', reversed_at: new Date(), reversed_by: p.userId, reversal_reason: p.reason } });
+    await audit(tx, p.userId, 'CUSTOMER_PAYMENT_REVERSED', 'payment', id, paymentRow, updated);
+    return updated;
+  });
+  res.json({ success: true, data: financeJson(data) });
+}
+
+module.exports = { invoice, payment, journal, salesInvoice, customerPayment };
