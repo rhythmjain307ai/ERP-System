@@ -8,6 +8,10 @@ datasource db {
 }
 
 model accounting_entry {
+  @@unique([company_id, source_type, source_id])
+  reversal_of_id BigInt? @unique
+  reversal_of accounting_entry? @relation("accounting_entry_reversal", fields: [reversal_of_id], references: [accounting_entry_id], onDelete: Restrict, onUpdate: NoAction)
+  reversed_by_entry accounting_entry? @relation("accounting_entry_reversal")
   accounting_entry_id BigInt          @id @default(autoincrement())
   company_id          BigInt
   entry_date          DateTime        @default(dbgenerated("CURRENT_DATE")) @db.Date
@@ -25,6 +29,9 @@ model accounting_entry {
 }
 
 model accounts_payable {
+  created_by BigInt?
+  created_user users? @relation("accounts_payable_created", fields: [created_by], references: [user_id], onDelete: Restrict)
+  created_at DateTime? @db.Timestamptz(6)
   accounts_payable_id BigInt               @id @default(autoincrement())
   vendor_id           BigInt
   vendor_invoice_id   BigInt?              @unique
@@ -135,6 +142,8 @@ model audit_log {
 }
 
 model bank_account {
+  gl_account_id BigInt?
+  gl_account chart_of_account? @relation(fields: [gl_account_id], references: [account_id], onDelete: Restrict)
   bank_account_id  BigInt             @id @default(autoincrement())
   company_id       BigInt
   bank_name        String
@@ -153,9 +162,16 @@ model bank_account {
 }
 
 model bank_transaction {
+  reconciled_by BigInt?
+  reconciled_user users? @relation("bank_transaction_reconciled", fields: [reconciled_by], references: [user_id], onDelete: Restrict)
+  matched_by BigInt?
+  matched_user users? @relation("bank_transaction_matched", fields: [matched_by], references: [user_id], onDelete: Restrict)
+  reconciliation_status String @default("UNRECONCILED")
+  matched_at DateTime? @db.Timestamptz(6)
+  reconciled_at DateTime? @db.Timestamptz(6)
   bank_transaction_id BigInt       @id @default(autoincrement())
   bank_account_id     BigInt
-  payment_id          BigInt?
+  payment_id          BigInt? @unique
   transaction_date    DateTime     @default(dbgenerated("CURRENT_DATE")) @db.Date
   transaction_type    String
   amount              Decimal      @db.Decimal(16, 2)
@@ -197,6 +213,16 @@ model bom_item {
 }
 
 model chart_of_account {
+  bank_accounts bank_account[]
+  finance_rounding company_finance_config[] @relation("Finance_rounding")
+  finance_cash company_finance_config[] @relation("Finance_cash")
+  finance_payable company_finance_config[] @relation("Finance_payable")
+  finance_input_cess company_finance_config[] @relation("Finance_input_cess")
+  finance_input_igst company_finance_config[] @relation("Finance_input_igst")
+  finance_input_sgst company_finance_config[] @relation("Finance_input_sgst")
+  finance_input_cgst company_finance_config[] @relation("Finance_input_cgst")
+  finance_expense company_finance_config[] @relation("Finance_expense")
+  finance_inventory company_finance_config[] @relation("Finance_inventory")
   account_id             BigInt             @id @default(autoincrement())
   company_id             BigInt
   account_code           String
@@ -214,6 +240,7 @@ model chart_of_account {
 }
 
 model company {
+  finance_config company_finance_config?
   company_id       BigInt             @id @default(autoincrement())
   company_name     String
   legal_name       String?
@@ -592,6 +619,9 @@ model item_category {
 }
 
 model journal_entry {
+  reversal_of_id BigInt? @unique
+  reversal_of journal_entry? @relation("journal_entry_reversal", fields: [reversal_of_id], references: [journal_entry_id], onDelete: Restrict, onUpdate: NoAction)
+  reversed_by_entry journal_entry? @relation("journal_entry_reversal")
   journal_entry_id    BigInt            @id @default(autoincrement())
   accounting_entry_id BigInt?
   journal_number      String            @unique
@@ -647,6 +677,14 @@ model machine {
 }
 
 model payment {
+  reversed_by BigInt?
+  reversed_user users? @relation("payment_reversed", fields: [reversed_by], references: [user_id], onDelete: Restrict)
+  created_by BigInt?
+  created_user users? @relation("payment_created", fields: [created_by], references: [user_id], onDelete: Restrict)
+  status String @default("CREATED")
+  created_at DateTime? @db.Timestamptz(6)
+  reversed_at DateTime? @db.Timestamptz(6)
+  reversal_reason String?
   payment_id         BigInt               @id @default(autoincrement())
   vendor_id          BigInt?
   customer_id        BigInt?
@@ -657,7 +695,7 @@ model payment {
   reference_number   String?
   amount             Decimal              @db.Decimal(16, 2)
   remarks            String?
-  bank_transaction   bank_transaction[]
+  bank_transaction   bank_transaction?
   bank_account       bank_account?        @relation(fields: [bank_account_id], references: [bank_account_id], onUpdate: NoAction, map: "fk_payment_bank")
   customer           customer?            @relation(fields: [customer_id], references: [customer_id], onUpdate: NoAction, map: "fk_payment_customer")
   vendor             vendor?              @relation(fields: [vendor_id], references: [vendor_id], onUpdate: NoAction, map: "fk_payment_vendor")
@@ -899,6 +937,17 @@ model stock_movement {
 }
 
 model users {
+  bank_transaction_reconciled bank_transaction[] @relation("bank_transaction_reconciled")
+  bank_transaction_matched bank_transaction[] @relation("bank_transaction_matched")
+  accounts_payable_created accounts_payable[] @relation("accounts_payable_created")
+  vendor_invoice_reversed vendor_invoice[] @relation("vendor_invoice_reversed")
+  vendor_invoice_cancelled vendor_invoice[] @relation("vendor_invoice_cancelled")
+  vendor_invoice_booked vendor_invoice[] @relation("vendor_invoice_booked")
+  vendor_invoice_created vendor_invoice[] @relation("vendor_invoice_created")
+  payment_allocation_reversed payment_allocation[] @relation("payment_allocation_reversed")
+  payment_allocation_created payment_allocation[] @relation("payment_allocation_created")
+  payment_reversed payment[] @relation("payment_reversed")
+  payment_created payment[] @relation("payment_created")
   user_id                   BigInt                      @id @default(autoincrement())
   employee_id               BigInt?                     @unique
   role_id                   BigInt?
@@ -958,6 +1007,19 @@ model vendor {
 }
 
 model vendor_invoice {
+  reversed_by BigInt?
+  reversed_user users? @relation("vendor_invoice_reversed", fields: [reversed_by], references: [user_id], onDelete: Restrict)
+  cancelled_by BigInt?
+  cancelled_user users? @relation("vendor_invoice_cancelled", fields: [cancelled_by], references: [user_id], onDelete: Restrict)
+  booked_by BigInt?
+  booked_user users? @relation("vendor_invoice_booked", fields: [booked_by], references: [user_id], onDelete: Restrict)
+  created_by BigInt?
+  created_user users? @relation("vendor_invoice_created", fields: [created_by], references: [user_id], onDelete: Restrict)
+  created_at DateTime? @db.Timestamptz(6)
+  booked_at DateTime? @db.Timestamptz(6)
+  cancelled_at DateTime? @db.Timestamptz(6)
+  reversed_at DateTime? @db.Timestamptz(6)
+  reversal_reason String?
   vendor_invoice_id   BigInt                @id @default(autoincrement())
   vendor_id           BigInt
   purchase_order_id   BigInt?
@@ -1376,6 +1438,12 @@ model invoice_extraction_review {
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 /// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
 model payment_allocation {
+  reversed_by BigInt?
+  reversed_user users? @relation("payment_allocation_reversed", fields: [reversed_by], references: [user_id], onDelete: Restrict)
+  created_by BigInt?
+  created_user users? @relation("payment_allocation_created", fields: [created_by], references: [user_id], onDelete: Restrict)
+  reversed_at DateTime? @db.Timestamptz(6)
+  reversal_reason String?
   payment_allocation_id  BigInt               @id @default(autoincrement())
   payment_id             BigInt
   accounts_payable_id    BigInt?
@@ -1404,4 +1472,27 @@ model purchase_requisition_item {
   remarks                      String?
   inventory_item               inventory_item       @relation(fields: [inventory_item_id], references: [inventory_item_id], onUpdate: NoAction)
   purchase_requisition         purchase_requisition @relation(fields: [purchase_requisition_id], references: [purchase_requisition_id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model company_finance_config {
+  company_id BigInt @id
+  company company @relation(fields: [company_id], references: [company_id], onDelete: Restrict)
+  inventory_account_id BigInt
+  inventory_account chart_of_account @relation("Finance_inventory", fields: [inventory_account_id], references: [account_id], onDelete: Restrict)
+  expense_account_id BigInt
+  expense_account chart_of_account @relation("Finance_expense", fields: [expense_account_id], references: [account_id], onDelete: Restrict)
+  input_cgst_account_id BigInt
+  input_cgst_account chart_of_account @relation("Finance_input_cgst", fields: [input_cgst_account_id], references: [account_id], onDelete: Restrict)
+  input_sgst_account_id BigInt
+  input_sgst_account chart_of_account @relation("Finance_input_sgst", fields: [input_sgst_account_id], references: [account_id], onDelete: Restrict)
+  input_igst_account_id BigInt
+  input_igst_account chart_of_account @relation("Finance_input_igst", fields: [input_igst_account_id], references: [account_id], onDelete: Restrict)
+  input_cess_account_id BigInt
+  input_cess_account chart_of_account @relation("Finance_input_cess", fields: [input_cess_account_id], references: [account_id], onDelete: Restrict)
+  payable_account_id BigInt
+  payable_account chart_of_account @relation("Finance_payable", fields: [payable_account_id], references: [account_id], onDelete: Restrict)
+  cash_account_id BigInt
+  cash_account chart_of_account @relation("Finance_cash", fields: [cash_account_id], references: [account_id], onDelete: Restrict)
+  rounding_account_id BigInt
+  rounding_account chart_of_account @relation("Finance_rounding", fields: [rounding_account_id], references: [account_id], onDelete: Restrict)
 }

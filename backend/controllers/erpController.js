@@ -1,4 +1,7 @@
 const prisma = require('../lib/prisma');
+const { audit, assertCompanyAccess } = require('../lib/finance');
+const { Money } = require('../lib/accountsPayable');
+const { postInvoice } = require('../lib/accounting');
 const fs = require('fs/promises');
 const path = require('path');
 const { processDocument } = require('../lib/ocr/documentProcessor');
@@ -22,6 +25,13 @@ const number = (value, field) => {
   const result = Number(value);
   if (!Number.isFinite(result)) throw new ValidationError(`${field} must be a number`);
   return result;
+};
+const decimal = (value, field) => {
+  try {
+    const result = new Money(String(value));
+    if (!result.isFinite()) throw new Error();
+    return result;
+  } catch { throw new ValidationError(`${field} must be a decimal number`); }
 };
 const required = (body, fields) => {
   const missing = fields.filter((field) => body[field] === undefined || body[field] === null || body[field] === '');
@@ -604,27 +614,28 @@ async function createVendorInvoice(req, res) {
   const purchaseOrderId = req.body.purchase_order_id === undefined || req.body.purchase_order_id === null ? undefined : id(req.body.purchase_order_id, 'purchase_order_id');
   const invoiceDate = date(req.body.invoice_date);
   const dueDate = date(req.body.due_date);
-  const otherCharges = req.body.other_charges === undefined ? 0 : number(req.body.other_charges, 'other_charges');
-  const roundOff = req.body.round_off === undefined ? 0 : number(req.body.round_off, 'round_off');
-  const suppliedCessAmount = req.body.cess_amount === undefined ? 0 : number(req.body.cess_amount, 'cess_amount');
+  const otherCharges = req.body.other_charges === undefined ? new Money(0) : decimal(req.body.other_charges, 'other_charges');
+  const roundOff = req.body.round_off === undefined ? new Money(0) : decimal(req.body.round_off, 'round_off');
+  const suppliedCessAmount = req.body.cess_amount === undefined ? new Money(0) : decimal(req.body.cess_amount, 'cess_amount');
   if (Number.isNaN(invoiceDate.getTime())) throw new ValidationError('invoice_date must be a valid date');
   if (Number.isNaN(dueDate.getTime())) throw new ValidationError('due_date must be a valid date');
   if (dueDate < invoiceDate) throw new ValidationError('Due date cannot be earlier than invoice date');
-  if (otherCharges < 0) throw new ValidationError('other_charges must be greater than or equal to zero');
-  if (roundOff < -1 || roundOff > 1) throw new ValidationError('round_off must be between -1 and 1');
-  if (suppliedCessAmount < 0) throw new ValidationError('cess_amount must be greater than or equal to zero');
-  const suppliedCgstAmount = req.body.cgst_amount === undefined ? 0 : number(req.body.cgst_amount, 'cgst_amount');
-  const suppliedSgstAmount = req.body.sgst_amount === undefined ? 0 : number(req.body.sgst_amount, 'sgst_amount');
-  const suppliedIgstAmount = req.body.igst_amount === undefined ? 0 : number(req.body.igst_amount, 'igst_amount');
-  if ((suppliedCgstAmount > 0 || suppliedSgstAmount > 0) && suppliedIgstAmount > 0) throw new ValidationError('CGST/SGST and IGST cannot both apply');
+  if (otherCharges.lt(0)) throw new ValidationError('other_charges must be greater than or equal to zero');
+  if (roundOff.lt(-1) || roundOff.gt(1)) throw new ValidationError('round_off must be between -1 and 1');
+  if (suppliedCessAmount.lt(0)) throw new ValidationError('cess_amount must be greater than or equal to zero');
+  const suppliedCgstAmount = req.body.cgst_amount === undefined ? new Money(0) : decimal(req.body.cgst_amount, 'cgst_amount');
+  const suppliedSgstAmount = req.body.sgst_amount === undefined ? new Money(0) : decimal(req.body.sgst_amount, 'sgst_amount');
+  const suppliedIgstAmount = req.body.igst_amount === undefined ? new Money(0) : decimal(req.body.igst_amount, 'igst_amount');
+  if ((suppliedCgstAmount.gt(0) || suppliedSgstAmount.gt(0)) && suppliedIgstAmount.gt(0)) throw new ValidationError('CGST/SGST and IGST cannot both apply');
   const supplierStateCode = req.body.supplier_gstin?.slice(0, 2);
   const recipientStateCode = req.body.recipient_gstin?.slice(0, 2);
   const isInterState = supplierStateCode && recipientStateCode && supplierStateCode !== recipientStateCode;
 
   const result = await prisma.$transaction(async (tx) => {
-    const vendor = await tx.vendor.findUnique({ where: { vendor_id: vendorId }, select: { is_active: true } });
+    const vendor = await tx.vendor.findUnique({ where: { vendor_id: vendorId }, select: { is_active: true, company_id: true } });
     if (!vendor) throw new ValidationError('vendor does not exist');
     if (!vendor.is_active) throw new ValidationError('vendor is inactive');
+    assertCompanyAccess(req, vendor.company_id);
 
     let purchaseOrder;
     if (purchaseOrderId !== undefined) {
@@ -637,21 +648,21 @@ async function createVendorInvoice(req, res) {
     const preparedItems = [];
     const requestedByPoItem = new Map();
     const requestedByGrnItem = new Map();
-    const roundMoney = (value) => Math.round((value + Number.EPSILON) * 100) / 100;
-    let taxableAmount = 0;
-    let discountAmount = 0;
-    let cgstAmount = 0;
-    let sgstAmount = 0;
-    let igstAmount = 0;
-    let cessAmount = 0;
-    let totalAmount = 0;
+    const roundMoney = (value) => new Money(value).toDecimalPlaces(2);
+    let taxableAmount = new Money(0);
+    let discountAmount = new Money(0);
+    let cgstAmount = new Money(0);
+    let sgstAmount = new Money(0);
+    let igstAmount = new Money(0);
+    let cessAmount = new Money(0);
+    let totalAmount = new Money(0);
 
     for (const [index, item] of req.body.items.entries()) {
       const inventoryItemId = id(item.inventory_item_id, `items[${index}].inventory_item_id`);
       const inventoryItem = await tx.inventory_item.findUnique({ where: { inventory_item_id: inventoryItemId }, select: { inventory_item_id: true } });
       if (!inventoryItem) throw new ValidationError(`items[${index}] inventory item does not exist`);
-      const quantity = number(item.quantity, `items[${index}].quantity`);
-      if (quantity <= 0) throw new ValidationError(`items[${index}].quantity must be greater than zero`);
+      const quantity = decimal(item.quantity, `items[${index}].quantity`);
+      if (quantity.lte(0)) throw new ValidationError(`items[${index}].quantity must be greater than zero`);
       let purchaseOrderItem;
       if (item.purchase_order_item_id !== undefined && item.purchase_order_item_id !== null) {
         if (purchaseOrderId === undefined) throw new ValidationError('purchase_order_id is required when purchase_order_item_id is supplied');
@@ -661,33 +672,33 @@ async function createVendorInvoice(req, res) {
         if (purchaseOrderItem.purchase_order_id !== purchaseOrderId) throw new ValidationError('purchase order item does not belong to the supplied purchase order');
         if (purchaseOrderItem.inventory_item_id !== inventoryItemId) throw new ValidationError('Invoice inventory item does not match purchase order item');
         if (purchaseOrderItem.uom !== item.uom) throw new ValidationError('Invoice UOM does not match purchase order item');
-        requestedByPoItem.set(purchaseOrderItemId.toString(), (requestedByPoItem.get(purchaseOrderItemId.toString()) || 0) + quantity);
+        requestedByPoItem.set(purchaseOrderItemId.toString(), (requestedByPoItem.get(purchaseOrderItemId.toString()) || new Money(0)).plus(quantity));
       }
       const rate = item.rate ?? item.unit_price ?? 0;
-      const unitPrice = number(rate, `items[${index}].rate`);
-      if (unitPrice < 0) throw new ValidationError(`items[${index}].rate must be greater than or equal to zero`);
-      if (purchaseOrderItem && unitPrice !== Number(purchaseOrderItem.unit_rate)) throw new ValidationError('Invoice rate does not match purchase order rate');
-      const discount = item.discount_amount === undefined ? 0 : number(item.discount_amount, `items[${index}].discount_amount`);
-      const gstRate = item.gst_rate === undefined ? 0 : number(item.gst_rate, `items[${index}].gst_rate`);
-      const cessRate = item.cess_rate === undefined ? 0 : number(item.cess_rate, `items[${index}].cess_rate`);
-      const suppliedItemCessAmount = item.cess_amount === undefined ? 0 : number(item.cess_amount, `items[${index}].cess_amount`);
-      const suppliedItemCgstAmount = item.cgst_amount === undefined ? 0 : number(item.cgst_amount, `items[${index}].cgst_amount`);
-      const suppliedItemSgstAmount = item.sgst_amount === undefined ? 0 : number(item.sgst_amount, `items[${index}].sgst_amount`);
-      const suppliedItemIgstAmount = item.igst_amount === undefined ? 0 : number(item.igst_amount, `items[${index}].igst_amount`);
-      if (discount < 0) throw new ValidationError(`items[${index}].discount_amount must be greater than or equal to zero`);
-      if (gstRate < 0 || gstRate > 100) throw new ValidationError(`items[${index}].gst_rate must be between 0 and 100`);
-      if (cessRate < 0) throw new ValidationError(`items[${index}].cess_rate must be greater than or equal to zero`);
-      if (suppliedItemCessAmount < 0) throw new ValidationError(`items[${index}].cess_amount must be greater than or equal to zero`);
-      if ((suppliedItemCgstAmount > 0 || suppliedItemSgstAmount > 0) && suppliedItemIgstAmount > 0) throw new ValidationError('CGST/SGST and IGST cannot both apply');
-      const taxableBeforeFloor = quantity * unitPrice - discount;
-      if (taxableBeforeFloor < 0) throw new ValidationError('taxable amount cannot be negative');
+      const unitPrice = decimal(rate, `items[${index}].rate`);
+      if (unitPrice.lt(0)) throw new ValidationError(`items[${index}].rate must be greater than or equal to zero`);
+      if (purchaseOrderItem && !unitPrice.eq(purchaseOrderItem.unit_rate.toString())) throw new ValidationError('Invoice rate does not match purchase order rate');
+      const discount = item.discount_amount === undefined ? new Money(0) : decimal(item.discount_amount, `items[${index}].discount_amount`);
+      const gstRate = item.gst_rate === undefined ? new Money(0) : decimal(item.gst_rate, `items[${index}].gst_rate`);
+      const cessRate = item.cess_rate === undefined ? new Money(0) : decimal(item.cess_rate, `items[${index}].cess_rate`);
+      const suppliedItemCessAmount = item.cess_amount === undefined ? new Money(0) : decimal(item.cess_amount, `items[${index}].cess_amount`);
+      const suppliedItemCgstAmount = item.cgst_amount === undefined ? new Money(0) : decimal(item.cgst_amount, `items[${index}].cgst_amount`);
+      const suppliedItemSgstAmount = item.sgst_amount === undefined ? new Money(0) : decimal(item.sgst_amount, `items[${index}].sgst_amount`);
+      const suppliedItemIgstAmount = item.igst_amount === undefined ? new Money(0) : decimal(item.igst_amount, `items[${index}].igst_amount`);
+      if (discount.lt(0)) throw new ValidationError(`items[${index}].discount_amount must be greater than or equal to zero`);
+      if (gstRate.lt(0) || gstRate.gt(100)) throw new ValidationError(`items[${index}].gst_rate must be between 0 and 100`);
+      if (cessRate.lt(0)) throw new ValidationError(`items[${index}].cess_rate must be greater than or equal to zero`);
+      if (suppliedItemCessAmount.lt(0)) throw new ValidationError(`items[${index}].cess_amount must be greater than or equal to zero`);
+      if ((suppliedItemCgstAmount.gt(0) || suppliedItemSgstAmount.gt(0)) && suppliedItemIgstAmount.gt(0)) throw new ValidationError('CGST/SGST and IGST cannot both apply');
+      const taxableBeforeFloor = quantity.times(unitPrice).minus(discount);
+      if (taxableBeforeFloor.lt(0)) throw new ValidationError('taxable amount cannot be negative');
       const lineTaxableAmount = roundMoney(taxableBeforeFloor);
-      const lineTaxAmount = roundMoney(lineTaxableAmount * gstRate / 100);
-      const lineCgstAmount = isInterState ? 0 : roundMoney(lineTaxAmount / 2);
-      const lineSgstAmount = isInterState ? 0 : roundMoney(lineTaxAmount - lineCgstAmount);
-      const lineIgstAmount = isInterState ? lineTaxAmount : 0;
-      const lineCessAmount = roundMoney(lineTaxableAmount * cessRate / 100);
-      const lineTotal = roundMoney(lineTaxableAmount + lineTaxAmount + lineCessAmount);
+      const lineTaxAmount = roundMoney(lineTaxableAmount.times(gstRate).div(100));
+      const lineCgstAmount = isInterState ? new Money(0) : roundMoney(lineTaxAmount.div(2));
+      const lineSgstAmount = isInterState ? new Money(0) : roundMoney(lineTaxAmount.minus(lineCgstAmount));
+      const lineIgstAmount = isInterState ? lineTaxAmount : new Money(0);
+      const lineCessAmount = roundMoney(lineTaxableAmount.times(cessRate).div(100));
+      const lineTotal = roundMoney(lineTaxableAmount.plus(lineTaxAmount).plus(lineCessAmount));
       const matches = [];
       for (const [matchIndex, match] of (Array.isArray(item.matches) ? item.matches : []).entries()) {
         const grnItemId = id(match.grn_item_id, `items[${index}].matches[${matchIndex}].grn_item_id`);
@@ -703,8 +714,8 @@ async function createVendorInvoice(req, res) {
         requestedByGrnItem.set(matchKey, (requestedByGrnItem.get(matchKey) || 0) + matchedQuantity);
         matches.push({ grnItemId, matchedQuantity });
       }
-      const totalMatchedQuantity = matches.reduce((total, match) => total + match.matchedQuantity, 0);
-      if (totalMatchedQuantity > quantity) throw new ValidationError('Matched quantity exceeds invoice item quantity');
+      const totalMatchedQuantity = matches.reduce((total, match) => total.plus(match.matchedQuantity), new Money(0));
+      if (totalMatchedQuantity.gt(quantity)) throw new ValidationError('Matched quantity exceeds invoice item quantity');
       preparedItems.push({
         index,
         inventoryItemId,
@@ -726,28 +737,31 @@ async function createVendorInvoice(req, res) {
         lineTotal,
         matches
       });
-      taxableAmount += lineTaxableAmount;
-      discountAmount += discount;
-      cgstAmount += lineCgstAmount;
-      sgstAmount += lineSgstAmount;
-      igstAmount += lineIgstAmount;
-      cessAmount += lineCessAmount;
-      totalAmount += lineTotal;
+      taxableAmount = taxableAmount.plus(lineTaxableAmount);
+      discountAmount = discountAmount.plus(discount);
+      cgstAmount = cgstAmount.plus(lineCgstAmount);
+      sgstAmount = sgstAmount.plus(lineSgstAmount);
+      igstAmount = igstAmount.plus(lineIgstAmount);
+      cessAmount = cessAmount.plus(lineCessAmount);
+      totalAmount = totalAmount.plus(lineTotal);
     }
 
     for (const [purchaseOrderItemId, requestedQuantity] of requestedByPoItem) {
       const alreadyInvoiced = await tx.vendor_invoice_item.aggregate({ where: { purchase_order_item_id: BigInt(purchaseOrderItemId) }, _sum: { quantity: true } });
-      const orderedQuantity = Number(preparedItems.find((item) => item.purchaseOrderItemId.toString() === purchaseOrderItemId).purchaseOrderItem.ordered_quantity);
-      if (Number(alreadyInvoiced._sum.quantity || 0) + requestedQuantity > orderedQuantity) throw new ValidationError('Invoice quantity exceeds purchase order quantity');
+      const orderedQuantity = new Money(preparedItems.find((item) => item.purchaseOrderItemId.toString() === purchaseOrderItemId).purchaseOrderItem.ordered_quantity.toString());
+      const alreadyInvoicedQuantity = new Money((alreadyInvoiced._sum.quantity || 0).toString());
+      if (alreadyInvoicedQuantity.plus(requestedQuantity).gt(orderedQuantity)) throw new ValidationError('Invoice quantity exceeds purchase order quantity');
     }
 
     for (const [grnItemId, requestedQuantity] of requestedByGrnItem) {
       const alreadyMatched = await tx.vendor_invoice_grn_match.aggregate({ where: { grn_item_id: BigInt(grnItemId) }, _sum: { matched_quantity: true } });
       const grnItem = await tx.grn_item.findUnique({ where: { grn_item_id: BigInt(grnItemId) }, select: { accepted_quantity: true } });
-      if (Number(alreadyMatched._sum.matched_quantity || 0) + requestedQuantity > Number(grnItem.accepted_quantity)) throw new ValidationError('Matched quantity exceeds GRN accepted quantity');
+      const alreadyMatchedQuantity = new Money((alreadyMatched._sum.matched_quantity || 0).toString());
+      if (alreadyMatchedQuantity.plus(requestedQuantity).gt(grnItem.accepted_quantity.toString())) throw new ValidationError('Matched quantity exceeds GRN accepted quantity');
     }
 
     const invoice = await tx.vendor_invoice.create({ data: {
+      created_by: req.user.user_id, created_at: new Date(),
       vendor_id: vendorId,
       purchase_order_id: purchaseOrderId,
       invoice_number: req.body.invoice_number,
@@ -766,7 +780,7 @@ async function createVendorInvoice(req, res) {
       discount_amount: roundMoney(discountAmount),
       other_charges: roundMoney(otherCharges),
       round_off: roundMoney(roundOff),
-      total_amount: roundMoney(totalAmount + otherCharges + roundOff),
+      total_amount: roundMoney(totalAmount.plus(otherCharges).plus(roundOff)),
       status: 'DRAFT'
     } });
 
@@ -793,6 +807,7 @@ async function createVendorInvoice(req, res) {
       }
     }
     const createdInvoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoice.vendor_invoice_id }, include: { vendor_invoice_item: { include: { vendor_invoice_grn_match: true } } } });
+    await audit(tx, req.user.user_id, 'INVOICE_CREATED', 'vendor_invoice', invoice.vendor_invoice_id, undefined, createdInvoice);
     return { ...createdInvoice, vendor_invoice_item: createdInvoice.vendor_invoice_item.map((item) => ({ ...item, match_status: Number(item.vendor_invoice_grn_match.reduce((total, match) => total + Number(match.matched_quantity), 0)) === 0 ? 'UNMATCHED' : Number(item.vendor_invoice_grn_match.reduce((total, match) => total + Number(match.matched_quantity), 0)) >= Number(item.quantity) ? 'FULLY_MATCHED' : 'PARTIALLY_MATCHED' })) };
   });
   res.status(201).json({ success: true, data: result });
@@ -801,10 +816,32 @@ async function createVendorInvoice(req, res) {
 async function transitionVendorInvoice(req, res, status) {
   const invoiceId = id(req.params.id, 'id');
   const result = await prisma.$transaction(async (tx) => {
-    const invoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId }, select: { status: true } });
+    // Both transitions take the same lock before checking status or creating AP.
+    await tx.$queryRaw`SELECT "vendor_invoice_id" FROM "public"."vendor_invoice" WHERE "vendor_invoice_id" = ${invoiceId} FOR UPDATE`;
+    const invoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId }, include: { vendor: { select: { company_id: true } } } });
     if (!invoice) throw new NotFoundError('vendor invoice');
+    assertCompanyAccess(req, invoice.vendor.company_id);
+    const payable = await tx.accounts_payable.findUnique({ where: { vendor_invoice_id: invoiceId }, select: { accounts_payable_id: true } });
+    if (payable) throw new ApiError(409, 'Vendor invoice cannot be booked or cancelled once accounts payable exists');
     if (invoice.status !== 'DRAFT') throw new ApiError(409, `Vendor invoice cannot transition from ${invoice.status} to ${status}`);
-    return tx.vendor_invoice.update({ where: { vendor_invoice_id: invoiceId }, data: { status } });
+    if (status === 'BOOKED' && invoice.total_amount.isNegative()) throw new ValidationError('Invoice total cannot be negative when booking');
+    const updatedInvoice = await tx.vendor_invoice.update({ where: { vendor_invoice_id: invoiceId }, data: { status, ...(status === 'BOOKED' ? { booked_by: req.user.user_id, booked_at: new Date() } : { cancelled_by: req.user.user_id, cancelled_at: new Date() }) } });
+    if (status === 'BOOKED') {
+      const createdPayable = await tx.accounts_payable.create({ data: {
+        created_by: req.user.user_id, created_at: new Date(),
+        vendor_id: invoice.vendor_id,
+        vendor_invoice_id: invoiceId,
+        due_date: invoice.due_date,
+        invoice_amount: invoice.total_amount,
+        paid_amount: 0,
+        outstanding_amount: invoice.total_amount,
+        status: 'OPEN'
+      } });
+      await audit(tx, req.user.user_id, 'AP_CREATED', 'accounts_payable', createdPayable.accounts_payable_id, undefined, createdPayable);
+      await postInvoice(tx, invoice, req.user.user_id);
+    }
+    await audit(tx, req.user.user_id, status === 'BOOKED' ? 'INVOICE_BOOKED' : 'INVOICE_CANCELLED', 'vendor_invoice', invoiceId, invoice, updatedInvoice);
+    return updatedInvoice;
   });
   res.json({ success: true, status: result.status });
 }
@@ -825,8 +862,9 @@ function addInvoiceMatchStatus(invoice) {
 }
 
 async function listVendorInvoices(req, res) {
+  assertCompanyAccess(req, req.companyId);
   const allowedStatuses = ['DRAFT', 'BOOKED', 'PARTIALLY_PAID', 'PAID', 'CANCELLED'];
-  const where = {};
+  const where = { vendor: { company_id: req.companyId } };
   if (req.query.status !== undefined) {
     if (!allowedStatuses.includes(req.query.status)) throw new ValidationError('status must be DRAFT, BOOKED, PARTIALLY_PAID, PAID, or CANCELLED');
     where.status = req.query.status;
@@ -836,9 +874,11 @@ async function listVendorInvoices(req, res) {
 }
 
 async function getVendorInvoice(req, res) {
-  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: id(req.params.id, 'id') }, include: { vendor_invoice_item: { include: { vendor_invoice_grn_match: true } } } });
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: id(req.params.id, 'id') }, include: { vendor: { select: { company_id: true } }, vendor_invoice_item: { include: { vendor_invoice_grn_match: true } } } });
   if (!invoice) throw new NotFoundError('vendor invoice');
-  res.json({ success: true, data: addInvoiceMatchStatus(invoice) });
+  assertCompanyAccess(req, invoice.vendor.company_id);
+  const { vendor, ...publicInvoice } = invoice;
+  res.json({ success: true, data: addInvoiceMatchStatus(publicInvoice) });
 }
 
 async function createDocument(req, res) {

@@ -481,6 +481,16 @@ test('aggregates multiple item totals', { skip: !integration }, async () => {
   context.created.vendorInvoiceIds.push(invoiceId);
 });
 
+test('preserves exact cents for large invoice calculations', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: '999999999.12', rate: '99999.99', gst_rate: '0' }] }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } });
+  assert.equal(invoice.taxable_amount.toFixed(2), '99999989912000.01');
+  assert.equal(invoice.total_amount.toFixed(2), '99999989912000.01');
+  context.created.vendorInvoiceIds.push(invoiceId);
+});
+
 test('rejects invalid GST rate and negative taxable amount', { skip: !integration }, async () => {
   for (const gstRate of [-1, 101]) {
     const invalidGst = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 10, gst_rate: gstRate }] }));
@@ -531,8 +541,8 @@ test('preserves DRAFT and creates no AP, payment, or accounting records', { skip
   context.created.vendorInvoiceIds.push(invoiceId);
 });
 
-async function createLifecycleInvoice() {
-  const response = await postInvoice(invoiceBody());
+async function createLifecycleInvoice(overrides = {}) {
+  const response = await postInvoice(invoiceBody(overrides));
   assert.equal(response.status, 201);
   const invoiceId = BigInt(response.body.data.vendor_invoice_id);
   context.created.vendorInvoiceIds.push(invoiceId);
@@ -555,6 +565,7 @@ test('cancels a draft invoice', { skip: !integration }, async () => {
   const response = await lifecycleRequest(invoiceId, 'cancel');
   assert.equal(response.status, 200);
   assert.equal(response.body.status, 'CANCELLED');
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 0);
 });
 
 test('rejects booking and cancellation after terminal transitions', { skip: !integration }, async () => {
@@ -569,12 +580,165 @@ test('rejects booking and cancellation after terminal transitions', { skip: !int
   assert.equal((await lifecycleRequest(cancelledId, 'cancel')).status, 409);
 });
 
-test('booking creates no AP, payment, or accounting records', { skip: !integration }, async () => {
+test('booking creates AP and a journal without payment or inventory posting', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  const sideEffects = async () => Promise.all([
+    prisma.stock_movement.count({ where: { inventory_item_id: BigInt(context.inventoryItemId) } })
+  ]);
+  const before = await sideEffects();
+  assert.equal((await lifecycleRequest(invoiceId, 'book')).status, 200);
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 1);
+  assert.equal(await prisma.payment.count({ where: { vendor_id: BigInt(context.vendorId) } }), 0);
+  assert.equal(await prisma.accounting_entry.count({ where: { source_type: 'VENDOR_INVOICE', source_id: invoiceId } }), 1);
+  const entry = await prisma.accounting_entry.findFirst({ where: { source_type: 'VENDOR_INVOICE', source_id: invoiceId }, include: { journal_entry: true } });
+  assert.equal(entry.journal_entry.length, 1);
+  assert.deepEqual(await sideEffects(), before);
+});
+
+test('booking copies invoice vendor, due date, and exact total into an OPEN AP', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice({ other_charges: 5, round_off: -0.25, items: [
+    { inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 2, rate: 100, discount_amount: 10, gst_rate: 18, cess_rate: 1 }
+  ] });
+  const response = await request(app).post(`/api/procurement/vendor-invoices/${invoiceId}/book`).set('Authorization', context.auth)
+    .send({ invoice_amount: 1, paid_amount: 1, outstanding_amount: 0, status: 'PAID' });
+  assert.equal(response.status, 200);
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } });
+  const payable = await prisma.accounts_payable.findUnique({ where: { vendor_invoice_id: invoiceId } });
+  assert.equal(invoice.status, 'BOOKED');
+  assert.equal(payable.vendor_id, invoice.vendor_id);
+  assert.equal(payable.vendor_invoice_id, invoiceId);
+  assert.equal(payable.due_date.toISOString(), invoice.due_date.toISOString());
+  assert.equal(payable.invoice_amount.toFixed(2), '230.85');
+  assert.ok(payable.invoice_amount.equals(invoice.total_amount));
+  assert.ok(payable.outstanding_amount.equals(invoice.total_amount));
+  assert.equal(payable.paid_amount.toFixed(2), '0.00');
+  assert.equal(payable.status, 'OPEN');
+});
+
+test('repeated booking and cancellation preserve the original AP and BOOKED invoice', { skip: !integration }, async () => {
   const invoiceId = await createLifecycleInvoice();
   assert.equal((await lifecycleRequest(invoiceId, 'book')).status, 200);
+  const before = await prisma.accounts_payable.findUnique({ where: { vendor_invoice_id: invoiceId } });
+  for (const action of ['book', 'cancel']) {
+    assert.equal((await lifecycleRequest(invoiceId, action)).status, 409);
+  }
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 1);
+  assert.deepEqual(await prisma.accounts_payable.findUnique({ where: { vendor_invoice_id: invoiceId } }), before);
+  assert.equal((await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } })).status, 'BOOKED');
+});
+
+test('database unique constraint rejects a second AP for the same invoice', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  assert.equal((await lifecycleRequest(invoiceId, 'book')).status, 200);
+  await assert.rejects(prisma.accounts_payable.create({ data: {
+    vendor_id: BigInt(context.vendorId), vendor_invoice_id: invoiceId,
+    invoice_amount: 25, outstanding_amount: 25, paid_amount: 0, status: 'OPEN'
+  } }), { code: 'P2002' });
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 1);
+});
+
+test('a draft invoice with existing AP cannot be booked or cancelled', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  const payable = await prisma.accounts_payable.create({ data: {
+    vendor_id: BigInt(context.vendorId), vendor_invoice_id: invoiceId,
+    invoice_amount: 25, outstanding_amount: 25, paid_amount: 0, status: 'OPEN'
+  } });
+  for (const action of ['book', 'cancel']) {
+    const response = await lifecycleRequest(invoiceId, action);
+    assert.equal(response.status, 409);
+    assert.match(response.body.error.message, /accounts payable exists/);
+  }
+  assert.equal((await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } })).status, 'DRAFT');
+  assert.deepEqual(await prisma.accounts_payable.findUnique({ where: { vendor_invoice_id: invoiceId } }), payable);
+});
+
+test('concurrent booking creates exactly one AP and rejects the losing request', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  const responses = await Promise.all([lifecycleRequest(invoiceId, 'book'), lifecycleRequest(invoiceId, 'book')]);
+  assert.deepEqual(responses.map(({ status }) => status).sort(), [200, 409]);
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 1);
+  assert.equal((await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } })).status, 'BOOKED');
+});
+
+test('concurrent booking and cancellation leave a consistent invoice and AP', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  const [booking, cancellation] = await Promise.all([lifecycleRequest(invoiceId, 'book'), lifecycleRequest(invoiceId, 'cancel')]);
+  assert.deepEqual([booking.status, cancellation.status].sort(), [200, 409]);
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } });
+  assert.equal(invoice.status, booking.status === 200 ? 'BOOKED' : 'CANCELLED');
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), booking.status === 200 ? 1 : 0);
+});
+
+test('AP insertion failure rolls back booking and permits a clean retry', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  const originalTransaction = prisma.$transaction;
+  const transaction = prisma.$transaction.bind(prisma);
+  let inserted = false;
+  // Inject a failure after a real AP insert in a real database transaction.
+  prisma.$transaction = (callback, ...options) => transaction(async (tx) => {
+    const payable = new Proxy(tx.accounts_payable, { get(target, property) {
+      if (property === 'create') return async (args) => {
+        assert.equal((await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } })).status, 'BOOKED');
+        await target.create(args);
+        inserted = true;
+        throw new Error('Injected failure after AP insert');
+      };
+      return target[property];
+    } });
+    return callback(new Proxy(tx, { get(target, property) {
+      return property === 'accounts_payable' ? payable : target[property];
+    } }));
+  }, ...options);
+  try {
+    assert.equal((await lifecycleRequest(invoiceId, 'book')).status, 500);
+    assert.equal(inserted, true);
+    assert.equal((await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } })).status, 'DRAFT');
+    assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 0);
+  } finally {
+    prisma.$transaction = originalTransaction;
+  }
+  assert.equal((await lifecycleRequest(invoiceId, 'book')).status, 200);
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 1);
+});
+
+test('booking preserves high precision stored amounts without Number conversion', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  await prisma.vendor_invoice.update({ where: { vendor_invoice_id: invoiceId }, data: { total_amount: '99999999999999.99', taxable_amount: '99999999999999.99' } });
+  await prisma.vendor_invoice_item.updateMany({ where: { vendor_invoice_id: invoiceId }, data: { taxable_amount: '99999999999999.99', line_total: '99999999999999.99' } });
+  assert.equal((await lifecycleRequest(invoiceId, 'book')).status, 200);
+  const payable = await prisma.accounts_payable.findUnique({ where: { vendor_invoice_id: invoiceId } });
+  assert.equal(payable.invoice_amount.toFixed(2), '99999999999999.99');
+  assert.equal(payable.outstanding_amount.toFixed(2), '99999999999999.99');
+});
+
+test('zero total invoices create OPEN AP with zero balances', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 0 }] });
+  assert.equal((await lifecycleRequest(invoiceId, 'book')).status, 200);
+  const payable = await prisma.accounts_payable.findUnique({ where: { vendor_invoice_id: invoiceId } });
+  for (const field of ['invoice_amount', 'paid_amount', 'outstanding_amount']) assert.equal(payable[field].toFixed(2), '0.00');
+  assert.equal(payable.status, 'OPEN');
+});
+
+test('negative total cannot be booked and leaves no AP', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice({ round_off: -1, items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 0 }] });
+  const response = await lifecycleRequest(invoiceId, 'book');
+  assert.equal(response.status, 400);
+  assert.match(response.body.error.message, /total cannot be negative/);
+  assert.equal((await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } })).status, 'DRAFT');
   assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 0);
-  assert.equal(await prisma.payment.count({ where: { vendor_id: BigInt(context.vendorId) } }), 0);
-  assert.equal(await prisma.accounting_entry.count({ where: { source_type: 'VENDOR_INVOICE', source_id: invoiceId } }), 0);
+});
+
+test('legacy BOOKED invoices without AP remain immutable', { skip: !integration }, async () => {
+  const invoiceId = await createLifecycleInvoice();
+  await prisma.vendor_invoice.update({ where: { vendor_invoice_id: invoiceId }, data: { status: 'BOOKED' } });
+  for (const action of ['book', 'cancel']) assert.equal((await lifecycleRequest(invoiceId, action)).status, 409);
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: invoiceId } }), 0);
+  assert.equal((await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } })).status, 'BOOKED');
+});
+
+test('missing invoice transitions return 404 without creating AP', { skip: !integration }, async () => {
+  for (const action of ['book', 'cancel']) assert.equal((await lifecycleRequest('999999999', action)).status, 404);
+  assert.equal(await prisma.accounts_payable.count({ where: { vendor_invoice_id: 999999999n } }), 0);
 });
 
 test('lists invoices and filters by status', { skip: !integration }, async () => {
