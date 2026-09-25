@@ -19,8 +19,13 @@ async function setupIntegration() {
 
   const company = await prisma.company.create({ data: { company_name: `Test Company ${suffix}` } });
   const financeFields = {};
-  for (const [key, account_type] of Object.entries(require('../lib/accounting').ACCOUNT_TYPES)) {
-    const account = await prisma.chart_of_account.create({ data: { company_id: company.company_id, account_code: `TEST-${key}`, account_name: key, account_type } });
+  const accountTypes = Object.entries(require('../lib/accounting').ACCOUNT_TYPES);
+  const accounts = await prisma.$transaction(accountTypes.map(([key, account_type]) => prisma.chart_of_account.create({
+    data: { company_id: company.company_id, account_code: `TEST-${key}`, account_name: key, account_type }
+  })));
+  for (let index = 0; index < accountTypes.length; index += 1) {
+    const [key] = accountTypes[index];
+    const account = accounts[index];
     financeFields[`${key}_account_id`] = account.account_id;
   }
   await prisma.company_finance_config.create({ data: { company_id: company.company_id, ...financeFields } });

@@ -15,6 +15,7 @@ function errorHandler(error, req, res, next) {
     if (error.code === 'P2025') { status = 404; message = 'Record not found'; }
     else if (error.code === 'P2002') { status = 409; message = 'A record with this unique value already exists'; details = error.meta; }
     else if (error.code === 'P2003') { status = 400; message = 'A referenced record does not exist'; details = error.meta; }
+    else console.error('Unhandled Prisma request error', { code: error.code, method: req.method, path: req.originalUrl });
   } else if (!(error instanceof ApiError)) {
     console.error(error);
   }

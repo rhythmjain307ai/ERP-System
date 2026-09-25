@@ -5,8 +5,12 @@ const { audit } = require('./finance');
 
 const ACCOUNT_TYPES = { inventory: 'ASSET', expense: 'EXPENSE', input_cgst: 'ASSET', input_sgst: 'ASSET', input_igst: 'ASSET', input_cess: 'ASSET', payable: 'LIABILITY', cash: 'ASSET', rounding: 'EXPENSE' };
 async function validateConfig(tx, companyId, config) {
-  for (const [key, type] of Object.entries(ACCOUNT_TYPES)) {
-    const account = await tx.chart_of_account.findUnique({ where: { account_id: config[`${key}_account_id`] } });
+  const required = Object.entries(ACCOUNT_TYPES).map(([key, type]) => ({ key, type, accountId: config[`${key}_account_id`] }));
+  const accountIds = [...new Set(required.map(({ accountId }) => accountId).filter((accountId) => accountId != null))];
+  const accounts = await tx.chart_of_account.findMany({ where: { account_id: { in: accountIds } } });
+  const accountsById = new Map(accounts.map((account) => [account.account_id.toString(), account]));
+  for (const { key, type, accountId } of required) {
+    const account = accountId == null ? null : accountsById.get(accountId.toString());
     if (!account || account.company_id !== companyId || !account.is_active || account.account_type !== type) throw new ValidationError(`${key} GL mapping must be an active ${type} account in this company`);
   }
   return config;
@@ -24,12 +28,14 @@ async function postJournal(tx, { companyId, sourceType, sourceId, date, userId, 
     const dr = new Money(String(line.debit || 0)), cr = new Money(String(line.credit || 0));
     if (!dr.isFinite() || !cr.isFinite() || dr.lt(0) || cr.lt(0) || dr.decimalPlaces() > 2 || cr.decimalPlaces() > 2 || (dr.gt(0) && cr.gt(0))) throw new ValidationError('Journal lines must contain valid debit or credit amounts');
     if (dr.isZero() && cr.isZero()) continue;
-    const account = await tx.chart_of_account.findUnique({ where: { account_id: line.accountId } });
-    if (!account || account.company_id !== companyId || !account.is_active) throw new ValidationError('Journal account must be active and belong to the source company');
     debit = debit.plus(dr); credit = credit.plus(cr);
     prepared.push({ account_id: line.accountId, debit_amount: dr.toString(), credit_amount: cr.toString() });
   }
   if (!debit.eq(credit)) throw new ValidationError('Journal is not balanced: debits must equal credits');
+  const accountIds = [...new Set(prepared.map(({ account_id }) => account_id).filter((accountId) => accountId != null))];
+  const accounts = await tx.chart_of_account.findMany({ where: { account_id: { in: accountIds } } });
+  const validAccountIds = new Set(accounts.filter((account) => account.company_id === companyId && account.is_active).map((account) => account.account_id.toString()));
+  if (accountIds.some((accountId) => !validAccountIds.has(accountId.toString()))) throw new ValidationError('Journal account must be active and belong to the source company');
   const entry = await tx.accounting_entry.create({ data: { company_id: companyId, entry_date: date, source_type: sourceType, source_id: sourceId, description, created_by: userId, reversal_of_id: reversalOf } });
   const journal = await tx.journal_entry.create({ data: { accounting_entry_id: entry.accounting_entry_id, journal_number: `J-${randomUUID()}`, entry_date: date, description, created_by: userId, reversal_of_id: journalReversalOf,
     journal_line: { create: prepared } }, include: { journal_line: true } });
