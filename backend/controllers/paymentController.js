@@ -2,7 +2,7 @@ const prisma = require('../lib/prisma');
 const { postAllocation } = require('../lib/accounting');
 const { ValidationError, ApiError, NotFoundError } = require('../lib/errors');
 const { Money, recalculatePayable } = require('../lib/accountsPayable');
-const { financeId, positiveMoney, financeDate, audit, financeJson } = require('../lib/finance');
+const { financeId, positiveMoney, financeDate, assertCompanyAccess, audit, financeJson } = require('../lib/finance');
 
 const MODES = ['BANK', 'CASH', 'CHEQUE', 'UPI', 'NEFT', 'RTGS', 'IMPS', 'OTHER'];
 
@@ -22,6 +22,7 @@ async function create(req, res) {
   const payment = await prisma.$transaction(async tx => {
     const vendor = await tx.vendor.findUnique({ where: { vendor_id: vendorId } });
     if (!vendor || !vendor.is_active) throw new ValidationError('Vendor does not exist or is inactive');
+    assertCompanyAccess(req, vendor.company_id);
     await tx.$queryRaw`SELECT "accounts_payable_id" FROM "public"."accounts_payable" WHERE "accounts_payable_id" = ${payableId} FOR UPDATE`;
     const payable = await tx.accounts_payable.findUnique({ where: { accounts_payable_id: payableId } });
     if (!payable || payable.vendor_id !== vendorId) throw new ValidationError('AP must exist and belong to the payment vendor');
@@ -49,9 +50,10 @@ async function allocate(req, res) {
   const total = rows.reduce((sum, row) => sum.plus(row.amount), new Money(0));
   const data = await prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT "payment_id" FROM "public"."payment" WHERE "payment_id" = ${paymentId} FOR UPDATE`;
-    const payment = await tx.payment.findUnique({ where: { payment_id: paymentId } });
+    const payment = await tx.payment.findUnique({ where: { payment_id: paymentId }, include: { vendor: { select: { company_id: true } } } });
     if (!payment) throw new NotFoundError('payment');
-    if (payment.payment_type !== 'VENDOR_PAYMENT' || payment.status === 'REVERSED') throw new ApiError(409, 'Payment cannot be allocated');
+    if (payment.payment_type !== 'VENDOR_PAYMENT' || payment.status === 'REVERSED' || !payment.vendor) throw new ApiError(409, 'Payment cannot be allocated');
+    assertCompanyAccess(req, payment.vendor.company_id);
     const allocated = await tx.payment_allocation.aggregate({ where: { payment_id: paymentId, reversed_at: null }, _sum: { allocated_amount: true } });
     const available = new Money(payment.amount.toString()).minus(allocated._sum.allocated_amount?.toString() || '0');
     if (total.gt(available)) throw new ApiError(409, 'Allocation exceeds available payment balance');

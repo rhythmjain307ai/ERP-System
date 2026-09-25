@@ -1,5 +1,5 @@
 const { Money, utcDate } = require('./accountsPayable');
-const { ValidationError } = require('./errors');
+const { ApiError, ValidationError } = require('./errors');
 function financeJson(value) {
   if (typeof value === 'bigint') return value.toString();
   if (Money.isDecimal(value)) return value.toString();
@@ -30,10 +30,14 @@ function financeDate(value, field) {
   return date;
 }
 
+function assertCompanyAccess(req, companyId) {
+  if (req.companyId === null || req.companyId === undefined || BigInt(req.companyId) !== BigInt(companyId)) throw new ApiError(403, 'Company access denied');
+}
+
 async function audit(tx, userId, action, table, recordId, oldValues, newValues) {
   return tx.audit_log.create({ data: { user_id: userId, action, table_name: table, record_id: recordId,
     ...(oldValues === undefined ? {} : { old_values: financeJson(oldValues) }),
     ...(newValues === undefined ? {} : { new_values: financeJson(newValues) }) } });
 }
 
-module.exports = { financeId, positiveMoney, financeDate, audit, financeJson };
+module.exports = { financeId, positiveMoney, financeDate, assertCompanyAccess, audit, financeJson };

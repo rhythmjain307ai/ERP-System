@@ -33,7 +33,8 @@ async function setupIntegration() {
   const inventoryItem = await prisma.inventory_item.create({ data: { item_code: `I-${suffix}`, item_name: `Test Item ${suffix}`, base_uom: 'EA' } });
   const lotInventoryItem = await prisma.inventory_item.create({ data: { item_code: `L-${suffix}`, item_name: `Lot Test Item ${suffix}`, base_uom: 'EA', is_lot_tracked: true } });
   const workflow = await prisma.approval_workflow.create({ data: { workflow_name: `Test Workflow ${suffix}`, transaction_type: 'TEST' } });
-  const user = await prisma.users.create({ data: { username: `test-user-${suffix}`, password_hash: 'not-a-real-password', role_id: role.role_id } });
+  const employee = await prisma.employee.create({ data: { company_id: company.company_id, employee_code: `E-${suffix}`, first_name: 'Test User' } });
+  const user = await prisma.users.create({ data: { username: `test-user-${suffix}`, password_hash: 'not-a-real-password', role_id: role.role_id, employee_id: employee.employee_id } });
 
   const created = {
     requisitionIds: [],
@@ -108,6 +109,7 @@ async function setupIntegration() {
         prisma.customer.delete({ where: { customer_id: otherCustomer.customer_id } }),
         prisma.vendor.delete({ where: { vendor_id: vendor.vendor_id } }),
         prisma.vendor.delete({ where: { vendor_id: otherVendor.vendor_id } }),
+        prisma.employee.delete({ where: { employee_id: employee.employee_id } }),
         prisma.factory.delete({ where: { factory_id: factory.factory_id } }),
         prisma.company.delete({ where: { company_id: company.company_id } })
       ]);

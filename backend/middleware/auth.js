@@ -27,10 +27,11 @@ async function requireAuth(req, res, next) {
   try {
     const user = await prisma.users.findUnique({
       where: { user_id: tokenUserId(req) },
-      select: { user_id: true, username: true, role_id: true, is_active: true, role: { select: { role_permission: { select: { permission: { select: { permission_code: true } } } } } } }
+      select: { user_id: true, username: true, role_id: true, employee_id: true, is_active: true, employee: { select: { company_id: true } }, role: { select: { role_permission: { select: { permission: { select: { permission_code: true } } } } } } }
     });
     if (!user || !user.is_active || !user.role) throw new ApiError(401, 'Invalid or inactive user');
     req.user = user;
+    req.companyId = user.employee?.company_id ?? null;
     req.permissions = new Set(user.role.role_permission.map(({ permission }) => permission.permission_code));
     next();
   } catch (error) { next(error); }

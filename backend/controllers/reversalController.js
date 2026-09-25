@@ -1,6 +1,6 @@
 const prisma = require('../lib/prisma');
 const { Money, recalculatePayable, utcDate } = require('../lib/accountsPayable');
-const { financeId, financeDate, audit, financeJson } = require('../lib/finance');
+const { financeId, financeDate, assertCompanyAccess, audit, financeJson } = require('../lib/finance');
 const { postJournal } = require('../lib/accounting');
 const { ApiError, ValidationError, NotFoundError } = require('../lib/errors');
 
@@ -32,8 +32,9 @@ async function invoice(req, res) {
   const id = financeId(req.params.id, 'vendor_invoice_id'), p = parameters(req);
   const data = await prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT "vendor_invoice_id" FROM "public"."vendor_invoice" WHERE "vendor_invoice_id" = ${id} FOR UPDATE`;
-    const invoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: id } });
+    const invoice = await tx.vendor_invoice.findUnique({ where: { vendor_invoice_id: id }, include: { vendor: { select: { company_id: true } } } });
     if (!invoice) throw new NotFoundError('vendor invoice');
+    assertCompanyAccess(req, invoice.vendor.company_id);
     if (invoice.status !== 'BOOKED' || invoice.reversed_at) throw new ApiError(409, 'Only an unreversed BOOKED invoice can be reversed');
     const ap = await tx.accounts_payable.findUnique({ where: { vendor_invoice_id: id } });
     if (!ap) throw new ApiError(409, 'Legacy invoice has no AP; reconciliation is required');
@@ -55,9 +56,11 @@ async function payment(req, res) {
   const id = financeId(req.params.id, 'payment_id'), p = parameters(req);
   const data = await prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT "payment_id" FROM "public"."payment" WHERE "payment_id" = ${id} FOR UPDATE`;
-    const payment = await tx.payment.findUnique({ where: { payment_id: id } });
+    const payment = await tx.payment.findUnique({ where: { payment_id: id }, include: { vendor: { select: { company_id: true } } } });
     if (!payment) throw new NotFoundError('payment');
     if (payment.status !== 'CREATED' || payment.payment_type !== 'VENDOR_PAYMENT') throw new ApiError(409, 'Payment cannot be reversed');
+    if (!payment.vendor) throw new ApiError(409, 'Payment vendor is missing');
+    assertCompanyAccess(req, payment.vendor.company_id);
     if (p.date < payment.payment_date) throw new ValidationError('Reversal date cannot precede payment date');
     if (await tx.bank_transaction.count({ where: { payment_id: id } })) throw new ApiError(409, 'Unmatch the bank transaction before reversing the payment');
     const allocations = await tx.payment_allocation.findMany({ where: { payment_id: id, reversed_at: null }, orderBy: { accounts_payable_id: 'asc' } });
@@ -97,6 +100,7 @@ async function journal(req, res) {
     const journal = await tx.journal_entry.findUnique({ where: { journal_entry_id: id }, include: { accounting_entry: true } });
     if (!journal) throw new NotFoundError('journal');
     if (!journal.accounting_entry || journal.accounting_entry.source_type !== 'MANUAL') throw new ApiError(409, 'Reverse managed journals through their invoice or payment');
+    assertCompanyAccess(req, journal.accounting_entry.company_id);
     return reverseEntry(tx, journal.accounting_entry_id, p);
   });
   res.json({ success: true, data: financeJson(data) });

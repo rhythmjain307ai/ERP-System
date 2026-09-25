@@ -1,9 +1,10 @@
 const prisma = require('../lib/prisma');
 const { ValidationError, NotFoundError } = require('../lib/errors');
+const { assertCompanyAccess } = require('../lib/finance');
 const { AP_STATUSES, Money, utcDate, calculatePayable, agingBucket } = require('../lib/accountsPayable');
 
 const include = {
-  vendor: { select: { vendor_id: true, vendor_code: true, vendor_name: true } },
+  vendor: { select: { vendor_id: true, vendor_code: true, vendor_name: true, company_id: true } },
   vendor_invoice: { select: { vendor_invoice_id: true, invoice_number: true, invoice_date: true } }
 };
 
@@ -32,7 +33,9 @@ function positiveInteger(value, field, fallback, max) {
 function filters(req, now) {
   if (req.query.as_of !== undefined) throw new ValidationError('Historical AP balances are not available; reports use current balances');
   const where = {};
-  if (req.query.company_id !== undefined) where.vendor = { company_id: positiveId(req.query.company_id, 'company_id') };
+  const companyId = req.query.company_id === undefined ? req.companyId : positiveId(req.query.company_id, 'company_id');
+  assertCompanyAccess(req, companyId);
+  where.vendor = { company_id: companyId };
   if (req.query.vendor_id !== undefined) where.vendor_id = positiveId(req.query.vendor_id, 'vendor_id');
   if (req.query.status !== undefined) {
     if (!AP_STATUSES.includes(req.query.status)) throw new ValidationError(`status must be one of ${AP_STATUSES.join(', ')}`);
@@ -60,7 +63,9 @@ async function list(req, res) {
     const vendorId = positiveId(req.params.vendorId, 'vendorId');
     if (where.vendor_id !== undefined && where.vendor_id !== vendorId) throw new ValidationError('vendor_id must match the vendor in the URL');
     where.vendor_id = vendorId;
-    if (!await prisma.vendor.findUnique({ where: { vendor_id: vendorId }, select: { vendor_id: true } })) throw new NotFoundError('vendor');
+    const vendor = await prisma.vendor.findUnique({ where: { vendor_id: vendorId }, select: { vendor_id: true, company_id: true } });
+    if (!vendor) throw new NotFoundError('vendor');
+    assertCompanyAccess(req, vendor.company_id);
   }
   const page = positiveInteger(req.query.page, 'page', 1, 2147483647);
   const pageSize = positiveInteger(req.query.pageSize, 'pageSize', 25, 100);
@@ -78,6 +83,7 @@ async function get(req, res) {
   if (req.query.as_of !== undefined) throw new ValidationError('Historical AP balances are not available; reports use current balances');
   const payable = await prisma.accounts_payable.findUnique({ where: { accounts_payable_id: positiveId(req.params.id, 'id') }, include });
   if (!payable) throw new NotFoundError('accounts payable');
+  assertCompanyAccess(req, payable.vendor.company_id);
   res.json({ success: true, data: publicPayable(payable) });
 }
 

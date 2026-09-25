@@ -72,15 +72,11 @@ test('reports isolate companies and validate dates, accounts and current-only fi
   const other = await setup();
   try {
     for (const name of ['purchase-register', 'trial-balance', 'general-ledger', 'vendor-outstanding', 'cash-flow-impact', 'accounts-payable-aging']) {
-      const response = await report(name, { company_id: other.companyId }); assert.equal(response.status, 200);
-      const data = response.body.data;
-      if (data.entries) assert.deepEqual(data.entries, []);
-      if (data.accounts) assert.deepEqual(data.accounts, []);
-      if (data.total_outstanding) assert.equal(data.total_outstanding, '0');
+      const response = await report(name, { company_id: other.companyId }); assert.equal(response.status, 403);
     }
-    assert.equal((await report('general-ledger', { account_id: String(other.financeFields.cash_account_id) })).status, 404);
+    assert.equal((await report('general-ledger', { company_id: other.companyId, account_id: String(other.financeFields.cash_account_id) })).status, 403);
   } finally { await other.cleanup(); }
-  assert.equal((await report('trial-balance', { company_id: '999999999' })).status, 404);
+  assert.equal((await report('trial-balance', { company_id: '999999999' })).status, 403);
   assert.equal((await report('trial-balance', { company_id: 'bad' })).status, 400);
   assert.equal((await report('trial-balance', { from: '2026-10-01', to: '2026-09-01' })).status, 400);
   assert.equal((await report('purchase-register', { from: '2026-02-30' })).status, 400);

@@ -1,6 +1,6 @@
 const prisma = require('../lib/prisma');
 const { Money, calculatePayable, utcDate } = require('../lib/accountsPayable');
-const { financeId, financeJson } = require('../lib/finance');
+const { financeId, assertCompanyAccess, financeJson } = require('../lib/finance');
 const { range } = require('./vendorLedgerController');
 const { NotFoundError, ValidationError } = require('../lib/errors');
 
@@ -9,6 +9,7 @@ const sum = (rows, key) => rows.reduce((total, row) => total.plus(row[key].toStr
 function report(build, current = false) {
   return async (req, res) => {
     const companyId = financeId(req.query.company_id, 'company_id');
+    assertCompanyAccess(req, companyId);
     if (current && ['from', 'to', 'as_of'].some(key => req.query[key] !== undefined)) throw new ValidationError('This report uses current AP balances; date filters are not supported');
     const dates = current ? {} : range(req.query);
     const data = await prisma.$transaction(async tx => {

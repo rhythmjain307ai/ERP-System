@@ -481,6 +481,16 @@ test('aggregates multiple item totals', { skip: !integration }, async () => {
   context.created.vendorInvoiceIds.push(invoiceId);
 });
 
+test('preserves exact cents for large invoice calculations', { skip: !integration }, async () => {
+  const response = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: '999999999.12', rate: '99999.99', gst_rate: '0' }] }));
+  assert.equal(response.status, 201);
+  const invoiceId = BigInt(response.body.data.vendor_invoice_id);
+  const invoice = await prisma.vendor_invoice.findUnique({ where: { vendor_invoice_id: invoiceId } });
+  assert.equal(invoice.taxable_amount.toFixed(2), '99999989912000.01');
+  assert.equal(invoice.total_amount.toFixed(2), '99999989912000.01');
+  context.created.vendorInvoiceIds.push(invoiceId);
+});
+
 test('rejects invalid GST rate and negative taxable amount', { skip: !integration }, async () => {
   for (const gstRate of [-1, 101]) {
     const invalidGst = await postInvoice(invoiceBody({ items: [{ inventory_item_id: context.inventoryItemId, uom: 'EA', quantity: 1, rate: 10, gst_rate: gstRate }] }));
