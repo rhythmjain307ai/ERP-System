@@ -51,7 +51,7 @@ function crudRouter(config, permission = 'master.write') {
   const [model, idField, required, search, , statusField, responseSelect] = config;
   const controller = makeCrud({ model, idField, requiredFields: required, fields: [...new Set([...required, ...search, 'description', 'status', statusField, 'is_active', 'email', 'phone', 'metadata', 'file_url', 'mime_type', 'password_hash', 'role_id', 'factory_id', 'department_id', 'item_category_id', 'base_uom', 'item_type', 'gst_rate', 'payment_terms_days', 'credit_limit', 'location', 'parent_category_id', 'remarks', 'movement_type', 'quantity', 'reference_type', 'reference_id', 'lot_id'])].filter(Boolean), searchFields: search, statusField, responseSelect });
   const router = express.Router();
-  router.get('/', asyncHandler(controller.list)); router.get('/:id', asyncHandler(controller.get)); router.post('/', requireAuth, requirePermission(permission), asyncHandler(controller.create)); router.patch('/:id', requireAuth, requirePermission(permission), asyncHandler(controller.update)); router.delete('/:id', requireAuth, requirePermission(permission), asyncHandler(controller.remove));
+  router.get('/', requireAuth, asyncHandler(controller.list)); router.get('/:id', requireAuth, asyncHandler(controller.get)); router.post('/', requireAuth, requirePermission(permission), asyncHandler(controller.create)); router.patch('/:id', requireAuth, requirePermission(permission), asyncHandler(controller.update)); router.delete('/:id', requireAuth, requirePermission(permission), asyncHandler(controller.remove));
   return router;
 }
 

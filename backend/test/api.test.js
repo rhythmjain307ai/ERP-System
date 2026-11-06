@@ -35,6 +35,25 @@ test('requires authentication for workflow and inventory reads', async () => {
   assert.deepEqual(responses.map(response => response.status), [401, 401, 401, 401, 401, 401, 401]);
 });
 
+test('requires authentication for generic master and inventory reads', async () => {
+  const paths = [
+    '/api/master/companies', '/api/master/factories', '/api/master/departments',
+    '/api/master/employees', '/api/master/users', '/api/master/roles',
+    '/api/master/permissions', '/api/master/customers', '/api/master/vendors',
+    '/api/master/item-categories', '/api/master/inventory-items',
+    '/api/master/warehouses', '/api/master/inventory-lots',
+    '/api/master/stock-movements', '/api/customers', '/api/vendors',
+    '/api/inventory/items', '/api/inventory/warehouses',
+    '/api/inventory/lots', '/api/inventory/movements'
+  ];
+  for (const path of paths) {
+    const list = await request(app).get(path);
+    const detail = await request(app).get(`${path}/1`);
+    assert.equal(list.status, 401, `GET ${path}`);
+    assert.equal(detail.status, 401, `GET ${path}/1`);
+  }
+});
+
 test('returns 404 for unknown routes', async () => {
   const response = await request(app).get('/api/unknown-record');
   assert.equal(response.status, 404);
