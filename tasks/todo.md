@@ -1,0 +1,32 @@
+# Phases 1–3 production-readiness tasks
+
+- [x] 0.1 Record endpoint, owner-company, permission, and test matrix for master, inventory, document, procurement, sales, and finance APIs. See `checkpoint0-audit.md`.
+- [ ] 0.2 Capture clean baseline: backend test counts, Prisma validation, staging migration status, frontend smoke, and environment separation.
+- [ ] Checkpoint 0: baseline evidence reviewed; no staging connection can write to production.
+- [ ] 1.1 Protect generic master/inventory reads and test anonymous/unauthorized access.
+- [ ] 1.2 Scope direct company-owned generic models and validate cross-company create/update IDs.
+- [ ] 1.3 Scope inherited-ownership models (factory/warehouse/lot/item relationships) and prohibit destructive inventory paths.
+- [ ] 1.4 Audit remaining workflow/document/finance reads and nested data with two-company integration tests.
+- [ ] Checkpoint 1: two-company isolation tests and complete backend suite pass with exact counts.
+- [ ] 2.1 Decide HMFL identity source and session policy; document role/action matrix.
+- [ ] 2.2 Implement real login/session verification, expiration/revocation, and disabled-user behavior.
+- [ ] 2.3 Connect frontend sign-in/logout, remove production demo-token flow, and test permitted/denied roles.
+- [ ] Checkpoint 2: browser and API permission tests pass; no placeholder authentication is reachable in production mode.
+- [ ] 3.1 Audit company GL/bank/tax mappings and create a configuration-health check.
+- [ ] 3.2 Add controlled onboarding/setup screen and balanced-posting/missing-mapping tests.
+- [ ] Checkpoint 3: representative AP/AR journals reconcile and failure leaves no partial posting.
+- [ ] 4.1 Inventory document metadata versus available binaries; report unrecoverable originals.
+- [ ] 4.2 Move uploads/retrieval to durable private storage with integrity and access tests.
+- [ ] 4.3 Establish OCR evaluation samples, baseline extraction accuracy, and targeted improvements.
+- [ ] Checkpoint 4: originals survive fresh deployment; OCR regression and review checks pass.
+- [ ] 5.1 Add PR checks for install, syntax/build, Prisma validation, and backend tests with isolated DB.
+- [ ] 5.2 Deploy to isolated staging and run migration, API, and browser smoke tests.
+- [ ] Checkpoint 5: broken tests/drift block promotion; staging flow succeeds.
+- [ ] 6.1 Rotate exposed credentials and verify secret handling.
+- [ ] 6.2 Add logs/alerts and perform separate Neon plus document-storage restore drill.
+- [ ] 6.3 Write deployment, rollback, incident, and recovery runbooks.
+- [ ] Checkpoint 6: operators can detect and recover a staged failure.
+- [ ] 7.1 Complete role-based frontend procurement, sales, finance, document, and admin journeys.
+- [ ] 7.2 Run realistic UAT and browser regression with allowed and denied roles.
+- [ ] 8.1 Publish API/permission/versioning contract and release evidence checklist.
+- [ ] Release checkpoint: full backend suite, schema checks, staging smoke, isolation tests, restore drill, and UAT have recorded results and owners.
